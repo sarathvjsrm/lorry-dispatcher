@@ -8,14 +8,12 @@ def load_google_sheet_data(sheet_name="gemini"):
     
     if "gcp_service_account" in st.secrets:
         creds_dict = dict(st.secrets["gcp_service_account"])
-        # Format private key properly to fix PEM error
         if "private_key" in creds_dict:
-            creds_dict["private_key"] = (
-                str(creds_dict["private_key"])
-                .replace("\\n", "\n")
-                .strip('"')
-                .strip("'")
-            )
+            # Reformat private key to resolve PEM parsing errors
+            pk = str(creds_dict["private_key"])
+            pk = pk.replace("\\n", "\n").replace('\\"', '"').strip('"').strip("'")
+            creds_dict["private_key"] = pk
+            
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     else:
         creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
