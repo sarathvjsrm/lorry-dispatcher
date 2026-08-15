@@ -101,7 +101,6 @@ st.subheader("📋 Enter Today's Schedule (25 Rows Available)")
 
 df_input = pd.DataFrame(blank_rows)
 
-# Interactive grid with Manual Text Entry for Work End Time
 edited_df = st.data_editor(
     df_input,
     num_rows="dynamic",
@@ -114,29 +113,20 @@ edited_df = st.data_editor(
     }
 )
 
-# Helper function to categorize custom time entries into display columns
 def parse_time_category(time_str):
     if not time_str:
         return "7PM"
-    
     clean_str = str(time_str).strip().lower().replace(" ", "").replace("pm", "").replace("am", "")
     try:
         if ":" in clean_str:
             parts = clean_str.split(":")
-            hour = int(parts[0])
-            minute = int(parts[1])
+            hour, minute = int(parts[0]), int(parts[1])
         else:
-            hour = int(clean_str)
-            minute = 0
+            hour, minute = int(clean_str), 0
             
-        # Convert 12-hour format to 24-hour equivalent for early evening numbers (e.g., 6:45 -> 18:45)
         if 1 <= hour <= 6:
             hour += 12
-        elif hour in [7, 8, 9, 10]:
-            # User typed standard 7, 9, 10
-            pass
 
-        # Time slot threshold categorization
         if hour < 19 or (hour == 19 and minute == 0):
             return "7PM"
         elif hour < 21 or (hour == 21 and minute == 0):
@@ -146,7 +136,7 @@ def parse_time_category(time_str):
     except:
         return "7PM"
 
-# --- AUTO-LOOKUP AND DISPATCH LOGIC ---
+# --- AUTO-LOOKUP & SMART DISPATCH LOAD BALANCER ---
 if st.button("🚀 Calculate Smart Routes & OT Plan"):
     
     active_df = edited_df.dropna(subset=["Site Name"]).copy()
@@ -173,23 +163,49 @@ if st.button("🚀 Calculate Smart Routes & OT Plan"):
                 return f"EXACT {end_time} (Must Scan Infotech at Site)"
 
         active_df["Infotech Rule"] = active_df.apply(determine_rule, axis=1)
-
-        # Auto driver assignment
-        def auto_assign_driver(row):
-            pax = row["Pax"]
-            zone = row["Zone"]
-            
-            if pax > 14:
-                return "14-ft Lorry (Mahendran / Pandi)"
-            elif pax > 4:
-                return "10-ft Lorry (Senthil)"
-            elif zone == "North":
-                return "10-ft Lorry (North Driver)"
-            else:
-                return "10-ft Lorry / Van (Senthil)"
-
-        active_df["Assigned Driver"] = active_df.apply(auto_assign_driver, axis=1)
         active_df["Time Bucket"] = active_df["Work End Time"].apply(parse_time_category)
+        active_df["Assigned Driver"] = ""
+
+        # --- REAL DRIVER LOAD-BALANCING ALGORITHM ---
+        # Fleet configuration per time bucket
+        for time_bucket in ["7PM", "9PM", "10PM"]:
+            slot_mask = active_df["Time Bucket"] == time_bucket
+            if not slot_mask.any():
+                continue
+
+            # Available fleet per time slot
+            avail_14ft = ["Mahendran (14-ft)", "Pandi (14-ft)"]
+            avail_north = ["North Driver (10-ft)"]
+            avail_10ft = ["Senthil (10-ft)", "Driver A (10-ft)", "Driver B (10-ft)", "Driver C (10-ft)"]
+
+            # Sort jobs in slot by Pax descending (assign big jobs first)
+            sub_indices = active_df[slot_mask].sort_values(by="Pax", ascending=False).index
+
+            for idx in sub_indices:
+                pax = active_df.loc[idx, "Pax"]
+                zone = active_df.loc[idx, "Zone"]
+
+                # 1. High pax (>14) -> 14-ft Lorry required
+                if pax > 14:
+                    if avail_14ft:
+                        active_df.loc[idx, "Assigned Driver"] = avail_14ft.pop(0)
+                    else:
+                        active_df.loc[idx, "Assigned Driver"] = "14-ft Lorry (External/Ad-hoc)"
+
+                # 2. North Zone -> North Specialist Driver
+                elif zone == "North" and avail_north:
+                    active_df.loc[idx, "Assigned Driver"] = avail_north.pop(0)
+
+                # 3. Standard 10-ft Lorry / Van jobs (Round-robin balancing)
+                else:
+                    if avail_10ft:
+                        active_df.loc[idx, "Assigned Driver"] = avail_10ft.pop(0)
+                    elif avail_14ft:
+                        active_df.loc[idx, "Assigned Driver"] = avail_14ft.pop(0) + " (Spare 14-ft)"
+                    elif avail_north:
+                        active_df.loc[idx, "Assigned Driver"] = avail_north.pop(0)
+                    else:
+                        active_df.loc[idx, "Assigned Driver"] = "⚠️ Subcontract / Extra Driver Needed"
 
         # --- SIDEBAR: AUTOMATIC OT TRACKER ---
         st.sidebar.header("⚖️ Live Driver OT Rotation")
