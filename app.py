@@ -3,17 +3,16 @@ import pandas as pd
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 import streamlit as st
 
-# Page Configuration
 st.set_page_config(
     page_title="Lorry Route Dispatcher", page_icon="🚛", layout="wide"
 )
 
-st.title("🚛 Dynamic Lorry Route Dispatcher")
+st.title("🚛 Dynamic Lorry Route Dispatcher (Time Window Enforced)")
 st.write(
-    "Calculates optimal driver routes dynamically using GPS coordinates, time slots, and load capacities."
+    "Strictly enforces chronological delivery time slots (19:00 -> 21:00 -> 22:00) and vehicle capacities."
 )
 
-# Sample Jobs & Fleet Setup
+# 1. Define Jobs with exact Minute Windows (0 = 19:00, 120 = 21:00, 180 = 22:00)
 jobs_data = [
     {
         "Name": "Depot/Hub",
@@ -21,6 +20,8 @@ jobs_data = [
         "lon": 103.8198,
         "demand": 0,
         "Slot": "Depot",
+        "start": 0,
+        "end": 360,
     },
     {
         "Name": "J115A - Nanyang Dr",
@@ -28,6 +29,8 @@ jobs_data = [
         "lon": 103.6831,
         "demand": 5,
         "Slot": "19:00",
+        "start": 0,
+        "end": 45,
     },
     {
         "Name": "22/00042 ITTC-GS",
@@ -35,6 +38,8 @@ jobs_data = [
         "lon": 103.6600,
         "demand": 2,
         "Slot": "19:00",
+        "start": 0,
+        "end": 45,
     },
     {
         "Name": "26/00017 WUXI",
@@ -42,6 +47,8 @@ jobs_data = [
         "lon": 103.6500,
         "demand": 1,
         "Slot": "19:00",
+        "start": 0,
+        "end": 45,
     },
     {
         "Name": "26/00078 Yang Ah Kang",
@@ -49,6 +56,8 @@ jobs_data = [
         "lon": 103.7050,
         "demand": 5,
         "Slot": "21:00",
+        "start": 120,
+        "end": 165,
     },
     {
         "Name": "268A Boon Lay Dr",
@@ -56,6 +65,8 @@ jobs_data = [
         "lon": 103.7050,
         "demand": 5,
         "Slot": "21:00",
+        "start": 120,
+        "end": 165,
     },
     {
         "Name": "Jurong West St 64",
@@ -63,6 +74,8 @@ jobs_data = [
         "lon": 103.7000,
         "demand": 10,
         "Slot": "21:00",
+        "start": 120,
+        "end": 165,
     },
     {
         "Name": "GHPL - Lor Semangka",
@@ -70,6 +83,8 @@ jobs_data = [
         "lon": 103.7150,
         "demand": 15,
         "Slot": "22:00",
+        "start": 180,
+        "end": 225,
     },
     {
         "Name": "25/00070 Woh Hup",
@@ -77,6 +92,8 @@ jobs_data = [
         "lon": 103.7500,
         "demand": 8,
         "Slot": "22:00",
+        "start": 180,
+        "end": 225,
     },
     {
         "Name": "26/00077 Micron",
@@ -84,6 +101,8 @@ jobs_data = [
         "lon": 103.7800,
         "demand": 11,
         "Slot": "22:00",
+        "start": 180,
+        "end": 225,
     },
 ]
 
@@ -95,24 +114,21 @@ drivers = [
 
 jobs_df = pd.DataFrame(jobs_data)
 
-# Display Input Data
 col1, col2 = st.columns(2)
 with col1:
-    st.subheader("📦 Today's Delivery Jobs")
+    st.subheader("📦 Delivery Jobs")
     st.dataframe(
         jobs_df[["Name", "Slot", "demand"]], use_container_width=True
     )
-
 with col2:
     st.subheader("🚚 Available Vehicles")
     st.dataframe(pd.DataFrame(drivers), use_container_width=True)
 
-# Run Optimization Button
 if st.button("🚀 Calculate Optimal Driver Routes", type="primary"):
     num_locations = len(jobs_df)
     time_matrix = np.zeros((num_locations, num_locations))
 
-    # Travel time calculation matrix
+    # Travel time matrix calculation
     for i in range(num_locations):
         for j in range(num_locations):
             if i != j:
@@ -139,6 +155,7 @@ if st.button("🚀 Calculate Optimal Driver Routes", type="primary"):
     transit_idx = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
 
+    # 1. Capacity Dimension
     def demand_callback(from_idx):
         return int(jobs_df.loc[manager.IndexToNode(from_idx), "demand"])
 
@@ -151,6 +168,22 @@ if st.button("🚀 Calculate Optimal Driver Routes", type="primary"):
         "Capacity",
     )
 
+    # 2. Time Window Dimension (CRITICAL FIX)
+    routing.AddDimension(
+        transit_idx,
+        60,  # Max wait time allowed at stop
+        360,  # Max total shift time (mins)
+        False,  # Don't force start at zero
+        "Time",
+    )
+    time_dimension = routing.GetDimensionOrDie("Time")
+
+    for loc_idx in range(num_locations):
+        index = manager.NodeToIndex(loc_idx)
+        time_dimension.CumulVar(index).SetRange(
+            int(jobs_df.loc[loc_idx, "start"]), int(jobs_df.loc[loc_idx, "end"])
+        )
+
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = (
         routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
@@ -158,34 +191,36 @@ if st.button("🚀 Calculate Optimal Driver Routes", type="primary"):
     search_params.local_search_metaheuristic = (
         routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
     )
-    search_params.time_limit.seconds = 3
+    search_params.time_limit.seconds = 5
 
     solution = routing.SolveWithParameters(search_params)
 
     if solution:
-        st.success("✅ Optimization Complete!")
+        st.success("✅ Chronological Optimization Complete!")
         for vehicle_id in range(len(drivers)):
             index = routing.Start(vehicle_id)
             d_info = drivers[vehicle_id]
             route_stops = []
-            total_time = 0
             total_load = 0
 
             while not routing.IsEnd(index):
                 node = manager.IndexToNode(index)
                 load = jobs_df.loc[node, "demand"]
+                slot = jobs_df.loc[node, "Slot"]
                 total_load += load
-                route_stops.append(f"{jobs_df.loc[node, 'Name']} ({load} pax)")
-                prev_idx = index
+                route_stops.append(
+                    f"[{slot}] {jobs_df.loc[node, 'Name']} ({load} pax)"
+                )
                 index = solution.Value(routing.NextVar(index))
-                total_time += time_callback(prev_idx, index)
 
             route_stops.append("Depot/Hub")
 
             with st.expander(
-                f"🚛 {d_info['Name']} — Load: {total_load}/{d_info['capacity']} pax | Travel Time: {total_time} mins",
+                f"🚛 {d_info['Name']} — Total Load: {total_load}/{d_info['capacity']} pax",
                 expanded=True,
             ):
                 st.write(" ➔ ".join(route_stops))
     else:
-        st.error("Could not find a valid solution under vehicle constraints.")
+        st.error(
+            "No valid route matches these time slots and vehicle limits. Try increasing vehicle capacity or adding another lorry."
+        )
