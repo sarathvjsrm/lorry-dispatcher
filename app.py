@@ -1,170 +1,207 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Dynamic Dispatch Engine", layout="wide")
-st.title("🧠 Smart Dynamic Fleet Dispatch Engine")
+st.set_page_config(page_title="Lorry Dispatch Engine", layout="wide")
+st.title("🚛 Operational Lorry Dispatch Engine")
 
-# Master Zone Database
+# 1. Master Zone Database
 SITE_DATABASE = {
-    "24/12233 MOE - MI": {"zone": "Central"},
-    "24/12201 MOE - ACJC (Dover)": {"zone": "Central"},
-    "24/12239 MOE - PEPS": {"zone": "Central"},
-    "24/12219 MOE - HPPS": {"zone": "Central"},
-    "GHPL - Lor Semangka": {"zone": "West"},
-    "24/12205 MOE - BLSS": {"zone": "West"},
-    "24/12212 MOE - CTSS": {"zone": "West"},
-    "26/00078 Yang Ah Kang": {"zone": "West"},
-    "J105 - 268A Boon Lay Dr": {"zone": "West"},
-    "J106 - Jurong West St 64": {"zone": "West"},
-    "J115A - Nanyang Dr": {"zone": "West"},
-    "22/00042 ITTC-GS": {"zone": "West"},
-    "26/00017 WUXI": {"zone": "West"},
-    "24/12204 MOE - BLGPS": {"zone": "West"},
-    "26/00077 Micron - L and K": {"zone": "North"},
-    "25/00070 Woh Hup": {"zone": "North"},
-    "Punggol S11": {"zone": "East"},
+    "24/12233 MOE - MI": "Central",
+    "24/12201 MOE - ACJC (Dover)": "Central",
+    "24/12239 MOE - PEPS": "Central",
+    "24/12219 MOE - HPPS": "Central",
+    "GHPL - Lor Semangka": "West",
+    "24/12205 MOE - BLSS": "West",
+    "24/12212 MOE - CTSS": "West",
+    "26/00078 Yang Ah Kang": "West",
+    "J105 - 268A Boon Lay Dr": "West",
+    "J106 - Jurong West St 64": "West",
+    "J115A - Nanyang Dr": "West",
+    "22/00042 ITTC-GS": "West",
+    "26/00017 WUXI": "West",
+    "24/12204 MOE - BLGPS": "West",
+    "26/00077 Micron - L and K": "North",
+    "25/00070 Woh Hup": "North",
+    "Punggol S11": "East",
 }
 
-site_options = sorted(list(SITE_DATABASE.keys()))
+site_list = sorted(list(SITE_DATABASE.keys()))
 
-default_data = [
-    {"Origin Site": "24/12204 MOE - BLGPS", "Job Type": "PJC-to-PJC Transfer", "Destination PJC": "24/12201 MOE - ACJC (Dover)", "Pax": 3, "Time Deadline": "18:30", "Food Drop": "NO"},
-    {"Origin Site": "24/12239 MOE - PEPS", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 1, "Time Deadline": "19:00", "Food Drop": "NO"},
-    {"Origin Site": "24/12219 MOE - HPPS", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 3, "Time Deadline": "19:00", "Food Drop": "NO"},
-    {"Origin Site": "J115A - Nanyang Dr", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 5, "Time Deadline": "19:00", "Food Drop": "NO"},
-    {"Origin Site": "22/00042 ITTC-GS", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 2, "Time Deadline": "19:00", "Food Drop": "NO"},
-    {"Origin Site": "26/00017 WUXI", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 1, "Time Deadline": "19:00", "Food Drop": "NO"},
-    {"Origin Site": "26/00078 Yang Ah Kang", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 5, "Time Deadline": "21:00", "Food Drop": "NO"},
-    {"Origin Site": "J105 - 268A Boon Lay Dr", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 5, "Time Deadline": "21:00", "Food Drop": "NO"},
-    {"Origin Site": "J106 - Jurong West St 64", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 10, "Time Deadline": "21:00", "Food Drop": "NO"},
-    {"Origin Site": "Punggol S11", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 3, "Time Deadline": "21:00", "Food Drop": "NO"},
-    {"Origin Site": "GHPL - Lor Semangka", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 15, "Time Deadline": "22:00", "Food Drop": "YES"},
-    {"Origin Site": "24/12205 MOE - BLSS", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 2, "Time Deadline": "22:00", "Food Drop": "YES"},
-    {"Origin Site": "24/12212 MOE - CTSS", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 2, "Time Deadline": "22:00", "Food Drop": "YES"},
-    {"Origin Site": "24/12233 MOE - MI", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 3, "Time Deadline": "22:00", "Food Drop": "YES"},
-    {"Origin Site": "24/12201 MOE - ACJC (Dover)", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 10, "Time Deadline": "22:00", "Food Drop": "YES"},
-    {"Origin Site": "26/00077 Micron - L and K", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 11, "Time Deadline": "22:00", "Food Drop": "YES"},
-    {"Origin Site": "25/00070 Woh Hup", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 8, "Time Deadline": "22:00", "Food Drop": "YES"},
+# 2. Driver & Vehicle Specs
+DRIVERS = [
+    {"name": "Senthil (10-ft)", "cap": 14, "home": "Central"},
+    {"name": "Staff Driver 5 (10-ft)", "cap": 14, "home": "West"},
+    {"name": "North Driver (10-ft)", "cap": 14, "home": "North"},
+    {"name": "Pandi (14-ft)", "cap": 25, "home": "East"},
+    {"name": "Mahendran (14-ft)", "cap": 25, "home": "West"},
 ]
 
+# 3. Default Input Dataset
+default_rows = [
+    {"Origin Site": "24/12204 MOE - BLGPS", "Job Type": "PJC-to-PJC Transfer", "Destination PJC": "24/12201 MOE - ACJC (Dover)", "Pax": 3, "Deadline": "18:30", "Food Drop": "NO"},
+    {"Origin Site": "24/12239 MOE - PEPS", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 1, "Deadline": "19:00", "Food Drop": "NO"},
+    {"Origin Site": "24/12219 MOE - HPPS", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 3, "Deadline": "19:00", "Food Drop": "NO"},
+    {"Origin Site": "J115A - Nanyang Dr", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 5, "Deadline": "19:00", "Food Drop": "NO"},
+    {"Origin Site": "22/00042 ITTC-GS", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 2, "Deadline": "19:00", "Food Drop": "NO"},
+    {"Origin Site": "26/00017 WUXI", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 1, "Deadline": "19:00", "Food Drop": "NO"},
+    {"Origin Site": "26/00078 Yang Ah Kang", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 5, "Deadline": "21:00", "Food Drop": "NO"},
+    {"Origin Site": "J105 - 268A Boon Lay Dr", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 5, "Deadline": "21:00", "Food Drop": "NO"},
+    {"Origin Site": "J106 - Jurong West St 64", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 10, "Deadline": "21:00", "Food Drop": "NO"},
+    {"Origin Site": "Punggol S11", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 3, "Deadline": "21:00", "Food Drop": "NO"},
+    {"Origin Site": "GHPL - Lor Semangka", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 15, "Deadline": "22:00", "Food Drop": "YES"},
+    {"Origin Site": "24/12205 MOE - BLSS", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 2, "Deadline": "22:00", "Food Drop": "YES"},
+    {"Origin Site": "24/12212 MOE - CTSS", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 2, "Deadline": "22:00", "Food Drop": "YES"},
+    {"Origin Site": "24/12233 MOE - MI", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 3, "Deadline": "22:00", "Food Drop": "YES"},
+    {"Origin Site": "24/12201 MOE - ACJC (Dover)", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 10, "Deadline": "22:00", "Food Drop": "YES"},
+    {"Origin Site": "26/00077 Micron - L and K", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 11, "Deadline": "22:00", "Food Drop": "YES"},
+    {"Origin Site": "25/00070 Woh Hup", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 8, "Deadline": "22:00", "Food Drop": "YES"},
+]
+
+# Add extra blank rows for user editing
+for _ in range(5):
+    default_rows.append({"Origin Site": None, "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 0, "Deadline": "19:00", "Food Drop": "NO"})
+
+st.subheader("📋 Dispatch Input Sheet")
+
 edited_df = st.data_editor(
-    pd.DataFrame(default_data),
+    pd.DataFrame(default_rows),
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "Origin Site": st.column_config.SelectboxColumn("Origin Site", options=site_options),
+        "Origin Site": st.column_config.SelectboxColumn("Origin Site / PJC", options=site_list),
         "Job Type": st.column_config.SelectboxColumn("Job Type", options=["Standard Drop-off", "PJC-to-PJC Transfer"]),
-        "Destination PJC": st.column_config.SelectboxColumn("Destination PJC", options=["N/A"] + site_options),
-        "Pax": st.column_config.NumberColumn("Pax", min_value=0, max_value=30),
-        "Time Deadline": st.column_config.SelectboxColumn("Time Deadline", options=["18:30", "19:00", "21:00", "22:00"]),
+        "Destination PJC": st.column_config.SelectboxColumn("Destination PJC", options=["N/A"] + site_list),
+        "Pax": st.column_config.NumberColumn("Pax", min_value=0, max_value=30, default=0),
+        "Deadline": st.column_config.SelectboxColumn("Time Deadline", options=["18:30", "19:00", "21:00", "22:00"]),
         "Food Drop": st.column_config.SelectboxColumn("Food Drop", options=["YES", "NO"]),
     }
 )
 
-if st.button("🚀 Run Dynamic Optimization"):
-    df = edited_df.dropna(subset=["Origin Site"]).copy()
-    df = df[df["Origin Site"] != ""]
-    
-    if df.empty:
-        st.warning("Please enter valid site data.")
+if st.button("⚡ Generate Dispatch Schedule"):
+    # Clean input data
+    data = edited_df.dropna(subset=["Origin Site"]).copy()
+    data = data[data["Origin Site"] != ""]
+
+    if data.empty:
+        st.warning("Please fill in job details.")
     else:
-        df["Zone"] = df["Origin Site"].apply(lambda s: SITE_DATABASE.get(s, {}).get("zone", "West"))
-        
-        # Fleet database setup
-        fleet = [
-            {"id": "Senthil (10-ft)", "cap": 14, "home": "Central"},
-            {"id": "Staff Driver 5 (10-ft)", "cap": 14, "home": "West"},
-            {"id": "North Driver (10-ft)", "cap": 14, "home": "North"},
-            {"id": "Pandi (14-ft)", "cap": 25, "home": "East"},
-            {"id": "Mahendran (14-ft)", "cap": 25, "home": "West"},
-        ]
+        data["Zone"] = data["Origin Site"].map(SITE_DATABASE).fillna("West")
+        st.divider()
 
-        # 1. Food Drop Routing (5:00 PM HQ dispatch)
-        food_jobs = df[df["Food Drop"] == "YES"]
-        st.subheader("🍱 Step 1: 5:00 PM HQ Food Pickup & Site Delivery")
-        food_table = []
-        for _, row in food_jobs.iterrows():
-            # Match home zone driver
-            driver = next((d["id"] for d in fleet if d["home"] == row["Zone"]), "Pandi (14-ft)")
-            food_table.append({
-                "HQ Pick Time": "17:00",
-                "Driver": driver,
-                "Site": row["Origin Site"],
-                "Pax to Feed": row["Pax"],
-                "ETA Site": "18:00 - 18:30"
-            })
-        st.table(pd.DataFrame(food_table))
+        # ---------------------------------------------------
+        # PHASE 1: 5:00 PM HQ FOOD PICKUPS
+        # ---------------------------------------------------
+        st.subheader("🍱 Phase 1: 5:00 PM HQ Food Collection & Pre-Drops")
+        food_jobs = data[data["Food Drop"] == "YES"].copy()
 
-        # 2. PJC Transfers
-        pjc_jobs = df[df["Job Type"] == "PJC-to-PJC Transfer"]
-        st.subheader("🔄 Step 2: Early PJC-to-PJC Shuttle Runs")
-        if not pjc_jobs.empty:
-            pjc_table = []
-            for _, row in pjc_jobs.iterrows():
-                driver = "Staff Driver 5 (10-ft)" if row["Zone"] == "West" else "Senthil (10-ft)"
-                pjc_table.append({
-                    "Time": row["Time Deadline"],
-                    "Driver": driver,
-                    "From": row["Origin Site"],
-                    "To": row["Destination PJC"],
-                    "Pax": row["Pax"]
+        if not food_jobs.empty:
+            food_list = []
+            for _, r in food_jobs.iterrows():
+                # Assign primary zone driver
+                if r["Pax"] > 14:
+                    driver = "Mahendran (14-ft)"
+                elif r["Zone"] == "Central":
+                    driver = "Senthil (10-ft)"
+                elif r["Zone"] == "North":
+                    driver = "North Driver (10-ft)"
+                else:
+                    driver = "Staff Driver 5 (10-ft)"
+
+                food_list.append({
+                    "HQ Collect": "17:00",
+                    "Assigned Driver": driver,
+                    "Drop Location": r["Origin Site"],
+                    "Zone": r["Zone"],
+                    "Pax Meals": r["Pax"],
+                    "ETA Site": "18:00 - 18:30"
                 })
-            st.table(pd.DataFrame(pjc_table))
-        else:
-            st.info("No PJC Transfers found.")
+            st.table(pd.DataFrame(food_list))
 
-        # 3. Dynamic Bin-Packing Allocation for Standard Runs
-        st.subheader("🚌 Step 3: Dynamic Capacity-Optimized Pickup Schedule")
-        
-        std_jobs = df[df["Job Type"] == "Standard Drop-off"].copy()
-        time_slots = sorted(std_jobs["Time Deadline"].unique())
-        
-        assigned_runs = []
+        # ---------------------------------------------------
+        # PHASE 2: PJC TRANSFERS
+        # ---------------------------------------------------
+        st.subheader("🔄 Phase 2: PJC-to-PJC Worker Transfers")
+        pjc_jobs = data[data["Job Type"] == "PJC-to-PJC Transfer"].copy()
+
+        if not pjc_jobs.empty:
+            pjc_list = []
+            for _, r in pjc_jobs.iterrows():
+                driver = "Staff Driver 5 (10-ft)" if r["Zone"] == "West" else "Senthil (10-ft)"
+                pjc_list.append({
+                    "Shuttle Window": "18:00 - 18:45",
+                    "Assigned Driver": driver,
+                    "Pickup PJC": r["Origin Site"],
+                    "Drop-off PJC": r["Destination PJC"],
+                    "Pax": r["Pax"]
+                })
+            st.table(pd.DataFrame(pjc_list))
+        else:
+            st.info("No PJC transfers scheduled.")
+
+        # ---------------------------------------------------
+        # PHASE 3: EVENING PICKUPS BY DRIVER
+        # ---------------------------------------------------
+        st.subheader("🚌 Phase 3: Driver Run Sheets (Enforced Capacity)")
+
+        std_jobs = data[data["Job Type"] == "Standard Drop-off"].copy()
+        time_slots = sorted(std_jobs["Deadline"].unique())
+
+        final_assignments = []
 
         for slot in time_slots:
-            slot_jobs = std_jobs[std_jobs["Time Deadline"] == slot]
-            
-            # Reset driver capacities for this time slot
-            driver_states = {d["id"]: {"cap_left": d["cap"], "home": d["home"]} for d in fleet}
-            
-            for _, job in slot_jobs.iterrows():
-                j_pax = job["Pax"]
-                j_zone = job["Zone"]
-                
-                # Priority 1: Match zone driver with capacity
-                best_driver = None
-                for d_id, state in driver_states.items():
-                    if state["home"] == j_zone and state["cap_left"] >= j_pax:
-                        best_driver = d_id
-                        break
-                
-                # Priority 2: If primary driver full/overloaded, find floating 14-ft relief driver
-                if not best_driver:
-                    for d_id in ["Pandi (14-ft)", "Mahendran (14-ft)"]:
-                        if driver_states[d_id]["cap_left"] >= j_pax:
-                            best_driver = d_id
-                            break
-                            
-                # Fallback: Assign to highest remaining capacity
-                if not best_driver:
-                    best_driver = max(driver_states, key=lambda k: driver_states[k]["cap_left"])
+            slot_data = std_jobs[std_jobs["Deadline"] == slot]
 
-                # Update driver available capacity state
-                driver_states[best_driver]["cap_left"] -= j_pax
-                
-                assigned_runs.append({
-                    "Time Deadline": slot,
-                    "Assigned Driver": best_driver,
+            # Track capacity remaining for each lorry in this time slot
+            caps = {d["name"]: d["cap"] for d in DRIVERS}
+
+            for _, job in slot_data.iterrows():
+                pax = job["Pax"]
+                zone = job["Zone"]
+                assigned_driver = None
+
+                # Rule 1: Single job > 14 pax must go to a 14-ft lorry
+                if pax > 14:
+                    for d_name in ["Mahendran (14-ft)", "Pandi (14-ft)"]:
+                        if caps[d_name] >= pax:
+                            assigned_driver = d_name
+                            break
+
+                # Rule 2: Match home zone driver if capacity allows
+                if not assigned_driver:
+                    for d in DRIVERS:
+                        if d["home"] == zone and caps[d["name"]] >= pax:
+                            assigned_driver = d["name"]
+                            break
+
+                # Rule 3: Overflow goes to floating 14-ft lorries
+                if not assigned_driver:
+                    for d_name in ["Pandi (14-ft)", "Mahendran (14-ft)"]:
+                        if caps[d_name] >= pax:
+                            assigned_driver = d_name
+                            break
+
+                # Rule 4: Final fallback to lorry with most space
+                if not assigned_driver:
+                    assigned_driver = max(caps, key=caps.get)
+
+                # Deduct capacity
+                caps[assigned_driver] -= pax
+
+                final_assignments.append({
+                    "Driver": assigned_driver,
+                    "Deadline": slot,
                     "Site Name": job["Origin Site"],
-                    "Zone": j_zone,
-                    "Pax": j_pax,
+                    "Zone": zone,
+                    "Pax": pax,
                     "Food Drop": job["Food Drop"]
                 })
 
-        schedule_df = pd.DataFrame(assigned_runs)
+        schedule_df = pd.DataFrame(final_assignments)
 
-        for d in [df_item["id"] for df_item in fleet]:
-            d_runs = schedule_df[schedule_df["Assigned Driver"] == d]
+        # Output grouped neatly by Driver
+        for d in DRIVERS:
+            d_name = d["name"]
+            d_runs = schedule_df[schedule_df["Driver"] == d_name]
             if not d_runs.empty:
-                st.markdown(f"#### 🚛 {d}")
-                st.table(d_runs[["Time Deadline", "Site Name", "Zone", "Pax", "Food Drop"]].reset_index(drop=True))
+                st.markdown(f"#### 🚛 {d_name}")
+                st.table(d_runs[["Deadline", "Site Name", "Zone", "Pax", "Food Drop"]].reset_index(drop=True))
