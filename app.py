@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Lorry Dispatcher - Site Database Integration", layout="wide")
+st.set_page_config(page_title="Lorry Dispatcher - Smart Route Consolidation", layout="wide")
 
 st.title("🚛 Master Lorry Dispatcher Engine")
 st.write("Select sites from the drop-down menu for today's jobs. Key in **Pax** and manually enter **Work End Time** (e.g., 6:45, 18:45, 19:00).")
@@ -91,7 +91,6 @@ SITE_DATABASE = {
 
 site_dropdown_options = sorted(list(SITE_DATABASE.keys()))
 
-# --- CREATE 25 BLANK INPUT ROWS ---
 blank_rows = [
     {"Site Name": None, "Pax": 0, "Work End Time": "19:00", "Food Drop": "NO"}
     for _ in range(25)
@@ -108,7 +107,7 @@ edited_df = st.data_editor(
     column_config={
         "Site Name": st.column_config.SelectboxColumn("Site Name (Database Dropdown)", options=site_dropdown_options, required=False),
         "Pax": st.column_config.NumberColumn("Pax (Workers)", min_value=0, max_value=30, step=1, default=0),
-        "Work End Time": st.column_config.TextColumn("Work End Time (e.g. 19:00, 6:45)", default="19:00", help="Manually type work end time"),
+        "Work End Time": st.column_config.TextColumn("Work End Time (e.g. 19:00, 6:45)", default="19:00"),
         "Food Drop": st.column_config.SelectboxColumn("Food Drop Required", options=["YES", "NO"], default="NO"),
     }
 )
@@ -136,7 +135,7 @@ def parse_time_category(time_str):
     except:
         return "7PM"
 
-# --- AUTO-LOOKUP & SMART DISPATCH LOAD BALANCER ---
+# --- SMART MULTI-STOP ROUTE CONSOLIDATION ---
 if st.button("🚀 Calculate Smart Routes & OT Plan"):
     
     active_df = edited_df.dropna(subset=["Site Name"]).copy()
@@ -149,63 +148,95 @@ if st.button("🚀 Calculate Smart Routes & OT Plan"):
         active_df["Travel Time (min)"] = active_df["Site Name"].apply(lambda s: SITE_DATABASE.get(s, {}).get("travel_min", 40))
         active_df["Zone"] = active_df["Site Name"].apply(lambda s: SITE_DATABASE.get(s, {}).get("zone", "Central"))
 
-        # Infotech rule check
         def determine_rule(row):
             site = str(row["Site Name"]).upper()
             pax = row["Pax"]
             end_time = str(row["Work End Time"]).strip()
-            
             if "MOE" in site:
                 return "Early Pickup OK (MOE Site)"
             elif pax <= 2:
                 return "Early Pickup OK (Pax <= 2)"
             else:
-                return f"EXACT {end_time} (Must Scan Infotech at Site)"
+                return f"EXACT {end_time} (Infotech Scan)"
 
         active_df["Infotech Rule"] = active_df.apply(determine_rule, axis=1)
         active_df["Time Bucket"] = active_df["Work End Time"].apply(parse_time_category)
         active_df["Assigned Driver"] = ""
+        active_df["Route Group"] = ""
 
-        # --- REAL DRIVER LOAD-BALANCING ALGORITHM ---
-        # Fleet configuration per time bucket
+        # Global Driver Pool
+        DRIVERS_10FT = ["Senthil (10-ft)", "Driver A (10-ft)", "Driver B (10-ft)", "Driver C (10-ft)"]
+        DRIVERS_NORTH = ["North Driver (10-ft)"]
+        DRIVERS_14FT = ["Mahendran (14-ft)", "Pandi (14-ft)"]
+
         for time_bucket in ["7PM", "9PM", "10PM"]:
             slot_mask = active_df["Time Bucket"] == time_bucket
             if not slot_mask.any():
                 continue
 
-            # Available fleet per time slot
-            avail_14ft = ["Mahendran (14-ft)", "Pandi (14-ft)"]
-            avail_north = ["North Driver (10-ft)"]
-            avail_10ft = ["Senthil (10-ft)", "Driver A (10-ft)", "Driver B (10-ft)", "Driver C (10-ft)"]
+            # Driver availability reset for each time window
+            pool_10ft = list(DRIVERS_10FT)
+            pool_north = list(DRIVERS_NORTH)
+            pool_14ft = list(DRIVERS_14FT)
 
-            # Sort jobs in slot by Pax descending (assign big jobs first)
-            sub_indices = active_df[slot_mask].sort_values(by="Pax", ascending=False).index
+            # Group jobs in the SAME time slot by Zone
+            zones_in_slot = active_df[slot_mask]["Zone"].unique()
 
-            for idx in sub_indices:
-                pax = active_df.loc[idx, "Pax"]
-                zone = active_df.loc[idx, "Zone"]
+            for zone in zones_in_slot:
+                zone_indices = active_df[slot_mask & (active_df["Zone"] == zone)].index
+                
+                current_pax_acc = 0
+                current_trip_indices = []
+                trip_num = 1
 
-                # 1. High pax (>14) -> 14-ft Lorry required
-                if pax > 14:
-                    if avail_14ft:
-                        active_df.loc[idx, "Assigned Driver"] = avail_14ft.pop(0)
+                for idx in zone_indices:
+                    job_pax = active_df.loc[idx, "Pax"]
+
+                    # Single massive job (>14 pax) gets a dedicated 14-ft lorry directly
+                    if job_pax > 14:
+                        driver_assigned = pool_14ft.pop(0) if pool_14ft else "14-ft Lorry (Ad-hoc)"
+                        active_df.loc[idx, "Assigned Driver"] = driver_assigned
+                        active_df.loc[idx, "Route Group"] = f"{zone} Direct Big Run"
+                        continue
+
+                    # If adding job exceeds 14 pax capacity, finalize previous combined route
+                    if current_pax_acc + job_pax > 14 and current_trip_indices:
+                        # Assign driver for completed trip
+                        if zone == "North" and pool_north:
+                            driver = pool_north.pop(0)
+                        elif pool_10ft:
+                            driver = pool_10ft.pop(0)
+                        elif pool_14ft:
+                            driver = pool_14ft.pop(0) + " (Spare)"
+                        else:
+                            driver = "⚠️ Extra Lorry Needed"
+
+                        for trip_idx in current_trip_indices:
+                            active_df.loc[trip_idx, "Assigned Driver"] = f"{driver} [Stop Cluster #{trip_num}]"
+                            active_df.loc[trip_idx, "Route Group"] = f"{zone} Route #{trip_num}"
+                        
+                        trip_num += 1
+                        current_pax_acc = 0
+                        current_trip_indices = []
+
+                    current_pax_acc += job_pax
+                    current_trip_indices.append(idx)
+
+                # Assign driver to remaining grouped jobs in zone
+                if current_trip_indices:
+                    if zone == "North" and pool_north:
+                        driver = pool_north.pop(0)
+                    elif pool_10ft:
+                        driver = pool_10ft.pop(0)
+                    elif pool_14ft:
+                        driver = pool_14ft.pop(0) + " (Spare)"
                     else:
-                        active_df.loc[idx, "Assigned Driver"] = "14-ft Lorry (External/Ad-hoc)"
+                        driver = "⚠️ Extra Lorry Needed"
 
-                # 2. North Zone -> North Specialist Driver
-                elif zone == "North" and avail_north:
-                    active_df.loc[idx, "Assigned Driver"] = avail_north.pop(0)
-
-                # 3. Standard 10-ft Lorry / Van jobs (Round-robin balancing)
-                else:
-                    if avail_10ft:
-                        active_df.loc[idx, "Assigned Driver"] = avail_10ft.pop(0)
-                    elif avail_14ft:
-                        active_df.loc[idx, "Assigned Driver"] = avail_14ft.pop(0) + " (Spare 14-ft)"
-                    elif avail_north:
-                        active_df.loc[idx, "Assigned Driver"] = avail_north.pop(0)
-                    else:
-                        active_df.loc[idx, "Assigned Driver"] = "⚠️ Subcontract / Extra Driver Needed"
+                    total_cluster_pax = current_pax_acc
+                    for trip_idx in current_trip_indices:
+                        active_df.loc[trip_idx, "Assigned Driver"] = f"{driver} ({total_cluster_pax} pax total)"
+                        active_df.loc[trip_idx, "Route Group"] = f"{zone} Combined Route #{trip_num}"
 
         # --- SIDEBAR: AUTOMATIC OT TRACKER ---
         st.sidebar.header("⚖️ Live Driver OT Rotation")
@@ -225,9 +256,9 @@ if st.button("🚀 Calculate Smart Routes & OT Plan"):
 
         # --- MAIN TABLE DISPLAY ---
         st.divider()
-        st.subheader("📊 Auto-Populated Active Dispatch Schedule")
+        st.subheader("📊 Combined Route Dispatch Schedule")
         
-        display_cols = ["Site Name", "Address", "Zone", "Pax", "Work End Time", "Travel Time (min)", "Assigned Driver", "Food Drop", "Infotech Rule"]
+        display_cols = ["Site Name", "Address", "Zone", "Pax", "Work End Time", "Travel Time (min)", "Route Group", "Assigned Driver", "Infotech Rule"]
         st.dataframe(active_df[display_cols], use_container_width=True)
 
         # --- TIME SLOTS DISPLAY ---
@@ -237,7 +268,7 @@ if st.button("🚀 Calculate Smart Routes & OT Plan"):
             st.markdown("### 🟢 Early / 7:00 PM Pickups")
             p7 = active_df[active_df["Time Bucket"] == "7PM"]
             if not p7.empty:
-                st.table(p7[["Site Name", "Work End Time", "Zone", "Pax", "Travel Time (min)", "Assigned Driver"]])
+                st.table(p7[["Site Name", "Zone", "Pax", "Route Group", "Assigned Driver"]])
             else:
                 st.write("No early / 7 PM pickups scheduled.")
 
@@ -245,7 +276,7 @@ if st.button("🚀 Calculate Smart Routes & OT Plan"):
             st.markdown("### 🟡 9:00 PM Pickups")
             p9 = active_df[active_df["Time Bucket"] == "9PM"]
             if not p9.empty:
-                st.table(p9[["Site Name", "Work End Time", "Zone", "Pax", "Travel Time (min)", "Assigned Driver"]])
+                st.table(p9[["Site Name", "Zone", "Pax", "Route Group", "Assigned Driver"]])
             else:
                 st.write("No 9 PM pickups scheduled.")
 
@@ -253,6 +284,6 @@ if st.button("🚀 Calculate Smart Routes & OT Plan"):
             st.markdown("### 🔴 10:00 PM Pickups (Max OT)")
             p10 = active_df[active_df["Time Bucket"] == "10PM"]
             if not p10.empty:
-                st.table(p10[["Site Name", "Work End Time", "Zone", "Pax", "Travel Time (min)", "Assigned Driver"]])
+                st.table(p10[["Site Name", "Zone", "Pax", "Route Group", "Assigned Driver"]])
             else:
                 st.write("No 10 PM pickups scheduled.")
