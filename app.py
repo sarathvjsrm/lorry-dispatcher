@@ -27,13 +27,13 @@ SITE_DATABASE = {
 
 site_list = sorted(list(SITE_DATABASE.keys()))
 
-# 2. Driver & Vehicle Specs (5 Named Drivers)
+# 2. Driver Specs (ONLY Senthil has 10-ft; all others are 14-ft)
 DRIVERS = [
     {"name": "Senthil (10-ft)", "cap": 14, "home": "Central"},
     {"name": "Mahendran (14-ft)", "cap": 25, "home": "West"},
     {"name": "Pandi (14-ft)", "cap": 25, "home": "East"},
-    {"name": "Sridhar (10-ft)", "cap": 14, "home": "North"},
-    {"name": "Kaling (10-ft)", "cap": 14, "home": "West"},
+    {"name": "Sridhar (14-ft)", "cap": 25, "home": "North"},
+    {"name": "Kaling (14-ft)", "cap": 25, "home": "West"},
 ]
 
 # 3. Default Input Dataset
@@ -57,7 +57,7 @@ default_rows = [
     {"Origin Site": "25/00070 Woh Hup", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 8, "Deadline": "22:00", "Food Drop": "YES"},
 ]
 
-for _ in range(5):
+for _ in range(3):
     default_rows.append({"Origin Site": None, "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 0, "Deadline": "19:00", "Food Drop": "NO"})
 
 st.subheader("📋 Dispatch Input Sheet")
@@ -95,17 +95,14 @@ if st.button("⚡ Generate Dispatch Schedule"):
         if not food_jobs.empty:
             food_list = []
             for _, r in food_jobs.iterrows():
-                # Dynamic matching based on capacity & zone
-                if r["Pax"] > 14:
-                    driver = "Mahendran (14-ft)" if r["Zone"] == "West" else "Pandi (14-ft)"
-                elif r["Zone"] == "Central":
+                if r["Zone"] == "Central":
                     driver = "Senthil (10-ft)"
                 elif r["Zone"] == "North":
-                    driver = "Sridhar (10-ft)"
+                    driver = "Sridhar (14-ft)"
                 elif r["Zone"] == "East":
                     driver = "Pandi (14-ft)"
                 else:
-                    driver = "Kaling (10-ft)"
+                    driver = "Mahendran (14-ft)" if r["Pax"] > 10 else "Kaling (14-ft)"
 
                 food_list.append({
                     "HQ Collect": "17:00",
@@ -126,7 +123,7 @@ if st.button("⚡ Generate Dispatch Schedule"):
         if not pjc_jobs.empty:
             pjc_list = []
             for _, r in pjc_jobs.iterrows():
-                driver = "Kaling (10-ft)" if r["Zone"] == "West" else "Senthil (10-ft)"
+                driver = "Kaling (14-ft)" if r["Zone"] == "West" else "Senthil (10-ft)"
                 pjc_list.append({
                     "Shuttle Window": "18:00 - 18:45",
                     "Assigned Driver": driver,
@@ -139,12 +136,15 @@ if st.button("⚡ Generate Dispatch Schedule"):
             st.info("No PJC transfers scheduled.")
 
         # ---------------------------------------------------
-        # PHASE 3: EVENING PICKUPS BY DRIVER (BALANCED LOAD)
+        # PHASE 3: EVENING PICKUPS (STRICT EVEN LOAD BALANCE)
         # ---------------------------------------------------
-        st.subheader("🚌 Phase 3: Driver Run Sheets (Enforced Capacity & Load Balance)")
+        st.subheader("🚌 Phase 3: Driver Run Sheets (Balanced Workload)")
 
         std_jobs = data[data["Job Type"] == "Standard Drop-off"].copy()
         time_slots = sorted(std_jobs["Deadline"].unique())
+        
+        # Track daily total sites assigned per driver to enforce balance
+        total_daily_jobs = {d["name"]: 0 for d in DRIVERS}
         final_assignments = []
 
         for slot in time_slots:
@@ -155,38 +155,26 @@ if st.button("⚡ Generate Dispatch Schedule"):
             for _, job in slot_data.iterrows():
                 pax = job["Pax"]
                 zone = job["Zone"]
-                assigned_driver = None
 
-                # Rule 1: Single job > 14 pax must go to a 14-ft lorry
-                if pax > 14:
-                    for d_name in ["Mahendran (14-ft)", "Pandi (14-ft)"]:
-                        if caps[d_name] >= pax:
-                            assigned_driver = d_name
-                            break
+                # Candidate pool filtering & sorting
+                candidates = [d for d in DRIVERS if caps[d["name"]] >= pax]
 
-                # Rule 2: Home zone match with remaining capacity & minimum jobs assigned in slot
-                if not assigned_driver:
-                    home_candidates = [
-                        d for d in DRIVERS 
-                        if d["home"] == zone and caps[d["name"]] >= pax
-                    ]
-                    if home_candidates:
-                        home_candidates.sort(key=lambda x: (slot_job_count[x["name"]], -caps[x["name"]]))
-                        assigned_driver = home_candidates[0]["name"]
+                # Sort by:
+                # 1. Total jobs assigned so far across shift (lightest load first)
+                # 2. Zone match preference
+                # 3. Jobs in current slot
+                # 4. Remaining capacity in vehicle
+                candidates.sort(key=lambda d: (
+                    total_daily_jobs[d["name"]],
+                    0 if d["home"] == zone else 1,
+                    slot_job_count[d["name"]],
+                    -caps[d["name"]]
+                ))
 
-                # Rule 3: Overflow load-balanced to driver with lowest job count in slot & available cap
-                if not assigned_driver:
-                    eligible = [d for d in DRIVERS if caps[d["name"]] >= pax]
-                    if eligible:
-                        eligible.sort(key=lambda x: (slot_job_count[x["name"]], -caps[x["name"]]))
-                        assigned_driver = eligible[0]["name"]
-
-                # Rule 4: Absolute fallback to lorry with most space
-                if not assigned_driver:
-                    assigned_driver = max(caps, key=caps.get)
-
+                assigned_driver = candidates[0]["name"]
                 caps[assigned_driver] -= pax
                 slot_job_count[assigned_driver] += 1
+                total_daily_jobs[assigned_driver] += 1
 
                 final_assignments.append({
                     "Driver": assigned_driver,
@@ -199,10 +187,10 @@ if st.button("⚡ Generate Dispatch Schedule"):
 
         schedule_df = pd.DataFrame(final_assignments)
 
-        # Output grouped neatly by Driver
+        # Output grouped by Driver
         for d in DRIVERS:
             d_name = d["name"]
             d_runs = schedule_df[schedule_df["Driver"] == d_name]
             if not d_runs.empty:
-                st.markdown(f"#### 🚛 {d_name}")
+                st.markdown(f"#### 🚛 {d_name} — Total Sites: {len(d_runs)}")
                 st.table(d_runs[["Deadline", "Site Name", "Zone", "Pax", "Food Drop"]].reset_index(drop=True))
