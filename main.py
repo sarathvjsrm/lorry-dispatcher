@@ -11,32 +11,39 @@ st.title("🚚 Daily Lorry Dispatch Generator")
 st.sidebar.header("Configuration")
 api_key_input = st.sidebar.text_input("Gemini API Key", type="password")
 
-# Your exact Spreadsheet ID from your URL
 SPREADSHEET_ID = "1AJXN_aUILuokaJhPLCTVb7IIwLnzc3gKpPCmfrJLOdY"
 
 
 def load_google_sheet_data():
     """
-    Loads site database and fleet drivers directly by Spreadsheet ID.
+    Loads site database and fleet drivers directly by Spreadsheet ID with tab-name fallback.
     """
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
     
-    # Extract and clean service account credentials from Streamlit secrets
     creds_dict = dict(st.secrets["gcp_service_account"])
     if "private_key" in creds_dict:
         creds_dict["private_key"] = str(creds_dict["private_key"]).replace("\\n", "\n")
         
-    # Authenticate directly using gspread's built-in dictionary handler
     client = gspread.service_account_from_dict(creds_dict, scopes=scopes)
-    
-    # Open sheet directly by Key ID
     sheet = client.open_by_key(SPREADSHEET_ID)
 
-    sites = sheet.worksheet("Site Database").get_all_records()
-    drivers = sheet.worksheet("Fleet_Drivers").get_all_records()
+    worksheets = sheet.worksheets()
+    sheet_names = [ws.title for ws in worksheets]
+
+    # Flexible matching by tab name (case & space insensitive) or fallback to index position
+    def get_data_by_name_or_index(preferred_name, fallback_index):
+        for ws in worksheets:
+            if ws.title.strip().lower() == preferred_name.strip().lower():
+                return ws.get_all_records()
+        if len(worksheets) > fallback_index:
+            return worksheets[fallback_index].get_all_records()
+        raise ValueError(f"Could not find worksheet '{preferred_name}'. Available tabs: {sheet_names}")
+
+    sites = get_data_by_name_or_index("Site Database", 0)
+    drivers = get_data_by_name_or_index("Fleet_Drivers", 1)
 
     return sites, drivers
 
