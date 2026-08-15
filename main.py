@@ -13,9 +13,9 @@ def load_google_sheet_data(sheet_name="Dispatch_Master"):
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     
     if "gcp_service_account" in st.secrets:
-        creds = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"], scopes=scopes
-        )
+        # Convert Streamlit Secrets object to standard python dict
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     else:
         creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
         
