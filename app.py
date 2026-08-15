@@ -27,13 +27,13 @@ SITE_DATABASE = {
 
 site_list = sorted(list(SITE_DATABASE.keys()))
 
-# 2. Driver & Vehicle Specs
+# 2. Driver & Vehicle Specs (5 Named Drivers)
 DRIVERS = [
     {"name": "Senthil (10-ft)", "cap": 14, "home": "Central"},
-    {"name": "Staff Driver 5 (10-ft)", "cap": 14, "home": "West"},
-    {"name": "North Driver (10-ft)", "cap": 14, "home": "North"},
-    {"name": "Pandi (14-ft)", "cap": 25, "home": "East"},
     {"name": "Mahendran (14-ft)", "cap": 25, "home": "West"},
+    {"name": "Pandi (14-ft)", "cap": 25, "home": "East"},
+    {"name": "Sridhar (10-ft)", "cap": 14, "home": "North"},
+    {"name": "Kaling (10-ft)", "cap": 14, "home": "West"},
 ]
 
 # 3. Default Input Dataset
@@ -57,7 +57,6 @@ default_rows = [
     {"Origin Site": "25/00070 Woh Hup", "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 8, "Deadline": "22:00", "Food Drop": "YES"},
 ]
 
-# Add extra blank rows for user editing
 for _ in range(5):
     default_rows.append({"Origin Site": None, "Job Type": "Standard Drop-off", "Destination PJC": "N/A", "Pax": 0, "Deadline": "19:00", "Food Drop": "NO"})
 
@@ -78,7 +77,6 @@ edited_df = st.data_editor(
 )
 
 if st.button("⚡ Generate Dispatch Schedule"):
-    # Clean input data
     data = edited_df.dropna(subset=["Origin Site"]).copy()
     data = data[data["Origin Site"] != ""]
 
@@ -97,15 +95,17 @@ if st.button("⚡ Generate Dispatch Schedule"):
         if not food_jobs.empty:
             food_list = []
             for _, r in food_jobs.iterrows():
-                # Assign primary zone driver
+                # Dynamic matching based on capacity & zone
                 if r["Pax"] > 14:
-                    driver = "Mahendran (14-ft)"
+                    driver = "Mahendran (14-ft)" if r["Zone"] == "West" else "Pandi (14-ft)"
                 elif r["Zone"] == "Central":
                     driver = "Senthil (10-ft)"
                 elif r["Zone"] == "North":
-                    driver = "North Driver (10-ft)"
+                    driver = "Sridhar (10-ft)"
+                elif r["Zone"] == "East":
+                    driver = "Pandi (14-ft)"
                 else:
-                    driver = "Staff Driver 5 (10-ft)"
+                    driver = "Kaling (10-ft)"
 
                 food_list.append({
                     "HQ Collect": "17:00",
@@ -126,7 +126,7 @@ if st.button("⚡ Generate Dispatch Schedule"):
         if not pjc_jobs.empty:
             pjc_list = []
             for _, r in pjc_jobs.iterrows():
-                driver = "Staff Driver 5 (10-ft)" if r["Zone"] == "West" else "Senthil (10-ft)"
+                driver = "Kaling (10-ft)" if r["Zone"] == "West" else "Senthil (10-ft)"
                 pjc_list.append({
                     "Shuttle Window": "18:00 - 18:45",
                     "Assigned Driver": driver,
@@ -139,20 +139,18 @@ if st.button("⚡ Generate Dispatch Schedule"):
             st.info("No PJC transfers scheduled.")
 
         # ---------------------------------------------------
-        # PHASE 3: EVENING PICKUPS BY DRIVER
+        # PHASE 3: EVENING PICKUPS BY DRIVER (BALANCED LOAD)
         # ---------------------------------------------------
-        st.subheader("🚌 Phase 3: Driver Run Sheets (Enforced Capacity)")
+        st.subheader("🚌 Phase 3: Driver Run Sheets (Enforced Capacity & Load Balance)")
 
         std_jobs = data[data["Job Type"] == "Standard Drop-off"].copy()
         time_slots = sorted(std_jobs["Deadline"].unique())
-
         final_assignments = []
 
         for slot in time_slots:
             slot_data = std_jobs[std_jobs["Deadline"] == slot]
-
-            # Track capacity remaining for each lorry in this time slot
             caps = {d["name"]: d["cap"] for d in DRIVERS}
+            slot_job_count = {d["name"]: 0 for d in DRIVERS}
 
             for _, job in slot_data.iterrows():
                 pax = job["Pax"]
@@ -166,26 +164,29 @@ if st.button("⚡ Generate Dispatch Schedule"):
                             assigned_driver = d_name
                             break
 
-                # Rule 2: Match home zone driver if capacity allows
+                # Rule 2: Home zone match with remaining capacity & minimum jobs assigned in slot
                 if not assigned_driver:
-                    for d in DRIVERS:
-                        if d["home"] == zone and caps[d["name"]] >= pax:
-                            assigned_driver = d["name"]
-                            break
+                    home_candidates = [
+                        d for d in DRIVERS 
+                        if d["home"] == zone and caps[d["name"]] >= pax
+                    ]
+                    if home_candidates:
+                        home_candidates.sort(key=lambda x: (slot_job_count[x["name"]], -caps[x["name"]]))
+                        assigned_driver = home_candidates[0]["name"]
 
-                # Rule 3: Overflow goes to floating 14-ft lorries
+                # Rule 3: Overflow load-balanced to driver with lowest job count in slot & available cap
                 if not assigned_driver:
-                    for d_name in ["Pandi (14-ft)", "Mahendran (14-ft)"]:
-                        if caps[d_name] >= pax:
-                            assigned_driver = d_name
-                            break
+                    eligible = [d for d in DRIVERS if caps[d["name"]] >= pax]
+                    if eligible:
+                        eligible.sort(key=lambda x: (slot_job_count[x["name"]], -caps[x["name"]]))
+                        assigned_driver = eligible[0]["name"]
 
-                # Rule 4: Final fallback to lorry with most space
+                # Rule 4: Absolute fallback to lorry with most space
                 if not assigned_driver:
                     assigned_driver = max(caps, key=caps.get)
 
-                # Deduct capacity
                 caps[assigned_driver] -= pax
+                slot_job_count[assigned_driver] += 1
 
                 final_assignments.append({
                     "Driver": assigned_driver,
