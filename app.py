@@ -4,105 +4,78 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 import streamlit as st
 
 st.set_page_config(
-    page_title="Lorry Route Dispatcher", page_icon="🚛", layout="wide"
+    page_title="Dynamic Lorry Dispatcher", page_icon="🚛", layout="wide"
 )
 
-st.title("🚛 Dynamic Lorry Route Dispatcher (Time Window Enforced)")
+st.title("🚛 Daily Lorry Route Dispatcher")
 st.write(
-    "Strictly enforces chronological delivery time slots (19:00 -> 21:00 -> 22:00) and vehicle capacities."
+    "Edit or paste today's job sites, PJC transfers, and pax numbers directly below."
 )
 
-# 1. Define Jobs with exact Minute Windows (0 = 19:00, 120 = 21:00, 180 = 22:00)
-jobs_data = [
+# Default starting list (Editable directly on screen)
+default_jobs = [
     {
-        "Name": "Depot/Hub",
-        "lat": 1.3521,
-        "lon": 103.8198,
-        "demand": 0,
-        "Slot": "Depot",
-        "start": 0,
-        "end": 360,
-    },
-    {
-        "Name": "J115A - Nanyang Dr",
-        "lat": 1.3483,
-        "lon": 103.6831,
-        "demand": 5,
+        "Site / Job Name": "J115A - Nanyang Dr",
         "Slot": "19:00",
-        "start": 0,
-        "end": 45,
+        "Pax": 5,
+        "Lat": 1.3483,
+        "Lon": 103.6831,
     },
     {
-        "Name": "22/00042 ITTC-GS",
-        "lat": 1.3200,
-        "lon": 103.6600,
-        "demand": 2,
+        "Site / Job Name": "22/00042 ITTC-GS",
         "Slot": "19:00",
-        "start": 0,
-        "end": 45,
+        "Pax": 2,
+        "Lat": 1.3200,
+        "Lon": 103.6600,
     },
     {
-        "Name": "26/00017 WUXI",
-        "lat": 1.3100,
-        "lon": 103.6500,
-        "demand": 1,
+        "Site / Job Name": "26/00017 WUXI",
         "Slot": "19:00",
-        "start": 0,
-        "end": 45,
+        "Pax": 1,
+        "Lat": 1.3100,
+        "Lon": 103.6500,
     },
     {
-        "Name": "26/00078 Yang Ah Kang",
-        "lat": 1.4250,
-        "lon": 103.7050,
-        "demand": 5,
+        "Site / Job Name": "26/00078 Yang Ah Kang",
         "Slot": "21:00",
-        "start": 120,
-        "end": 165,
+        "Pax": 5,
+        "Lat": 1.4250,
+        "Lon": 103.7050,
     },
     {
-        "Name": "268A Boon Lay Dr",
-        "lat": 1.3450,
-        "lon": 103.7050,
-        "demand": 5,
+        "Site / Job Name": "268A Boon Lay Dr",
         "Slot": "21:00",
-        "start": 120,
-        "end": 165,
+        "Pax": 5,
+        "Lat": 1.3450,
+        "Lon": 103.7050,
     },
     {
-        "Name": "Jurong West St 64",
-        "lat": 1.3400,
-        "lon": 103.7000,
-        "demand": 10,
+        "Site / Job Name": "Jurong West St 64",
         "Slot": "21:00",
-        "start": 120,
-        "end": 165,
+        "Pax": 10,
+        "Lat": 1.3400,
+        "Lon": 103.7000,
     },
     {
-        "Name": "GHPL - Lor Semangka",
-        "lat": 1.4350,
-        "lon": 103.7150,
-        "demand": 15,
+        "Site / Job Name": "GHPL - Lor Semangka",
         "Slot": "22:00",
-        "start": 180,
-        "end": 225,
+        "Pax": 15,
+        "Lat": 1.4350,
+        "Lon": 103.7150,
     },
     {
-        "Name": "25/00070 Woh Hup",
-        "lat": 1.4400,
-        "lon": 103.7500,
-        "demand": 8,
+        "Site / Job Name": "25/00070 Woh Hup",
         "Slot": "22:00",
-        "start": 180,
-        "end": 225,
+        "Pax": 8,
+        "Lat": 1.4400,
+        "Lon": 103.7500,
     },
     {
-        "Name": "26/00077 Micron",
-        "lat": 1.4500,
-        "lon": 103.7800,
-        "demand": 11,
+        "Site / Job Name": "26/00077 Micron",
         "Slot": "22:00",
-        "start": 180,
-        "end": 225,
+        "Pax": 11,
+        "Lat": 1.4500,
+        "Lon": 103.7800,
     },
 ]
 
@@ -112,115 +85,112 @@ drivers = [
     {"Name": "Driver 3 (10-ft)", "capacity": 14},
 ]
 
-jobs_df = pd.DataFrame(jobs_data)
+depot = {"Name": "Depot/Hub", "lat": 1.3521, "lon": 103.8198, "demand": 0}
 
-col1, col2 = st.columns(2)
-with col1:
-    st.subheader("📦 Delivery Jobs")
-    st.dataframe(
-        jobs_df[["Name", "Slot", "demand"]], use_container_width=True
-    )
-with col2:
-    st.subheader("🚚 Available Vehicles")
-    st.dataframe(pd.DataFrame(drivers), use_container_width=True)
+st.subheader("📝 Today's Site List (Add/Edit Rows Here)")
+edited_df = st.data_editor(
+    pd.DataFrame(default_jobs), num_rows="dynamic", use_container_width=True
+)
 
-if st.button("🚀 Calculate Optimal Driver Routes", type="primary"):
-    num_locations = len(jobs_df)
-    time_matrix = np.zeros((num_locations, num_locations))
-
-    # Travel time matrix calculation
-    for i in range(num_locations):
-        for j in range(num_locations):
-            if i != j:
-                lat1, lon1 = np.radians(jobs_df.loc[i, ["lat", "lon"]])
-                lat2, lon2 = np.radians(jobs_df.loc[j, ["lat", "lon"]])
-                dlat, dlon = lat2 - lat1, lon2 - lon1
-                a = (
-                    np.sin(dlat / 2) ** 2
-                    + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-                )
-                dist_km = 6371 * 2 * np.arcsin(np.sqrt(a))
-                time_matrix[i][j] = int((dist_km / 35) * 60)
-
-    manager = pywrapcp.RoutingIndexManager(num_locations, len(drivers), 0)
-    routing = pywrapcp.RoutingModel(manager)
-
-    def time_callback(from_idx, to_idx):
-        return int(
-            time_matrix[manager.IndexToNode(from_idx)][
-                manager.IndexToNode(to_idx)
-            ]
-        )
-
-    transit_idx = routing.RegisterTransitCallback(time_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
-
-    # 1. Capacity Dimension
-    def demand_callback(from_idx):
-        return int(jobs_df.loc[manager.IndexToNode(from_idx), "demand"])
-
-    demand_idx = routing.RegisterUnaryTransitCallback(demand_callback)
-    routing.AddDimensionWithVehicleCapacity(
-        demand_idx,
-        0,
-        [d["capacity"] for d in drivers],
-        True,
-        "Capacity",
-    )
-
-    # 2. Time Window Dimension (CRITICAL FIX)
-    routing.AddDimension(
-        transit_idx,
-        60,  # Max wait time allowed at stop
-        360,  # Max total shift time (mins)
-        False,  # Don't force start at zero
-        "Time",
-    )
-    time_dimension = routing.GetDimensionOrDie("Time")
-
-    for loc_idx in range(num_locations):
-        index = manager.NodeToIndex(loc_idx)
-        time_dimension.CumulVar(index).SetRange(
-            int(jobs_df.loc[loc_idx, "start"]), int(jobs_df.loc[loc_idx, "end"])
-        )
-
-    search_params = pywrapcp.DefaultRoutingSearchParameters()
-    search_params.first_solution_strategy = (
-        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    )
-    search_params.local_search_metaheuristic = (
-        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    )
-    search_params.time_limit.seconds = 5
-
-    solution = routing.SolveWithParameters(search_params)
-
-    if solution:
-        st.success("✅ Chronological Optimization Complete!")
-        for vehicle_id in range(len(drivers)):
-            index = routing.Start(vehicle_id)
-            d_info = drivers[vehicle_id]
-            route_stops = []
-            total_load = 0
-
-            while not routing.IsEnd(index):
-                node = manager.IndexToNode(index)
-                load = jobs_df.loc[node, "demand"]
-                slot = jobs_df.loc[node, "Slot"]
-                total_load += load
-                route_stops.append(
-                    f"[{slot}] {jobs_df.loc[node, 'Name']} ({load} pax)"
-                )
-                index = solution.Value(routing.NextVar(index))
-
-            route_stops.append("Depot/Hub")
-
-            with st.expander(
-                f"🚛 {d_info['Name']} — Total Load: {total_load}/{d_info['capacity']} pax",
-                expanded=True,
-            ):
-                st.write(" ➔ ".join(route_stops))
+if st.button("🚀 Calculate Dispatch Routes", type="primary"):
+    if edited_df.empty:
+        st.error("Please add at least one site to compute routes.")
     else:
-        st.error(
-            "No valid route matches these time slots and vehicle limits. Try increasing vehicle capacity or adding another lorry."
-        )
+        # Get unique time slots dynamically based on what you typed
+        unique_slots = sorted(edited_df["Slot"].dropna().unique())
+
+        for slot in unique_slots:
+            slot_jobs = edited_df[edited_df["Slot"] == slot].to_dict("records")
+            st.subheader(f"⏰ Shift Run: {slot}")
+
+            # Prepare routing locations
+            locations = [depot] + [
+                {
+                    "Name": j["Site / Job Name"],
+                    "lat": float(j.get("Lat", 1.35)),
+                    "lon": float(j.get("Lon", 103.8)),
+                    "demand": int(j.get("Pax", 0)),
+                }
+                for j in slot_jobs
+            ]
+
+            n_locs = len(locations)
+            df_locs = pd.DataFrame(locations)
+
+            # Build Distance Matrix
+            time_matrix = np.zeros((n_locs, n_locs))
+            for i in range(n_locs):
+                for j in range(n_locs):
+                    if i != j:
+                        lat1, lon1 = np.radians(df_locs.loc[i, ["lat", "lon"]])
+                        lat2, lon2 = np.radians(df_locs.loc[j, ["lat", "lon"]])
+                        dlat, dlon = lat2 - lat1, lon2 - lon1
+                        a = (
+                            np.sin(dlat / 2) ** 2
+                            + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+                        )
+                        time_matrix[i][j] = int(
+                            (6371 * 2 * np.arcsin(np.sqrt(a)) / 35) * 60
+                        )
+
+            # Solve Route
+            manager = pywrapcp.RoutingIndexManager(n_locs, len(drivers), 0)
+            routing = pywrapcp.RoutingModel(manager)
+
+            def time_cb(i, j):
+                return int(
+                    time_matrix[manager.IndexToNode(i)][manager.IndexToNode(j)]
+                )
+
+            transit_idx = routing.RegisterTransitCallback(time_cb)
+            routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
+
+            def demand_cb(i):
+                return int(df_locs.loc[manager.IndexToNode(i), "demand"])
+
+            demand_idx = routing.RegisterUnaryTransitCallback(demand_cb)
+            routing.AddDimensionWithVehicleCapacity(
+                demand_idx,
+                0,
+                [d["capacity"] for d in drivers],
+                True,
+                "Capacity",
+            )
+
+            for v in range(len(drivers)):
+                routing.SetFixedCostOfVehicle(100, v)
+
+            search_params = pywrapcp.DefaultRoutingSearchParameters()
+            search_params.first_solution_strategy = (
+                routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+            )
+
+            solution = routing.SolveWithParameters(search_params)
+
+            if solution:
+                cols = st.columns(len(drivers))
+                active_col = 0
+                for v_id in range(len(drivers)):
+                    idx = routing.Start(v_id)
+                    stops = []
+                    load = 0
+
+                    while not routing.IsEnd(idx):
+                        node = manager.IndexToNode(idx)
+                        if node != 0:
+                            stops.append(
+                                f"{df_locs.loc[node, 'Name']} ({df_locs.loc[node, 'demand']} pax)"
+                            )
+                            load += df_locs.loc[node, "demand"]
+                        idx = solution.Value(routing.NextVar(idx))
+
+                    if stops:
+                        with cols[active_col]:
+                            st.info(
+                                f"**{drivers[v_id]['Name']}**\n\n"
+                                f"**Load:** {load} / {drivers[v_id]['capacity']} pax\n\n"
+                                f"**Route:** Depot ➔ "
+                                + " ➔ ".join(stops)
+                                + " ➔ Depot"
+                            )
+                        active_col += 1
