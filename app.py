@@ -86,6 +86,7 @@ SITE_DATABASE = {
     "J115A - Nanyang Dr": {"address": "Nanyang Dr", "travel_min": 25, "zone": "West"},
     "GHPL - Lor Semangka": {"address": "Lor Semangka", "travel_min": 39, "zone": "West"},
     "Punggol S11": {"address": "Punggol East", "travel_min": 65, "zone": "East"},
+    "Sunview": {"address": "Sunview Way", "travel_min": 30, "zone": "West"},
 }
 
 site_dropdown_options = sorted(list(SITE_DATABASE.keys()))
