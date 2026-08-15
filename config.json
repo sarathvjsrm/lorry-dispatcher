@@ -7,12 +7,13 @@
       {"id": "AI1056", "name": "K. Pandi", "vehicle": "GBD 3576R"},
       {"id": "AI933", "name": "Senthil", "vehicle": "GBD 4509D / GBD 3955E"}
     ],
-    "reserve_staff": [
+    "staff_flex": [
       {
         "id": "AG664",
         "name": "Saravanan",
         "vehicle": "GBJ 5546H / GBD 3503B",
-        "rule": "Staff driver. Use ONLY when primary drivers are full. Max 1 trip per day, preferably long-distance single runs (e.g., Tuas or Woodlands)."
+        "role": "Staff Driver",
+        "assignment_preference": "Long-distance sites (Tuas, Jurong Island, Woodlands) or on-demand/overflow runs. Unlimited trips based on operational need."
       }
     ],
     "blacklisted": ["AI1048", "AG670"]
