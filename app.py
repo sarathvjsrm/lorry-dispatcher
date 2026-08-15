@@ -11,7 +11,6 @@ st.title("🚚 Daily Lorry Dispatch Generator")
 st.sidebar.header("Configuration")
 api_key_input = st.sidebar.text_input("Gemini API Key", type="password", key="gemini_api_key_input")
 
-# Your exact Spreadsheet ID
 SPREADSHEET_ID = "1AJXN_aUILuokaJhPLCTVb7IIwLnzc3gKpPCmfrJLOdY"
 
 
@@ -55,7 +54,7 @@ def get_clean_records(worksheet):
 
 def load_google_sheet_data():
     """
-    Loads site database and fleet drivers directly by Spreadsheet ID with fallback handling.
+    Loads site database and fleet drivers directly by Spreadsheet ID.
     """
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -89,6 +88,34 @@ def load_google_sheet_data():
     return sites, drivers
 
 
+def get_available_model():
+    """
+    Dynamically finds an available Gemini model supported by your API key.
+    """
+    preferred_models = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash"
+    ]
+    
+    try:
+        available_models = [
+            m.name.replace("models/", "") 
+            for m in genai.list_models() 
+            if "generateContent" in m.supported_generation_methods
+        ]
+        for preferred in preferred_models:
+            if preferred in available_models:
+                return preferred
+        if available_models:
+            return available_models[0]
+    except Exception:
+        pass
+        
+    return "gemini-2.5-flash"
+
+
 def run_dispatcher(api_key, shift_type):
     """
     Generates dispatch schedule using Gemini API and Google Sheets data.
@@ -96,7 +123,9 @@ def run_dispatcher(api_key, shift_type):
     genai.configure(api_key=api_key)
     sites, drivers = load_google_sheet_data()
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model_name = get_available_model()
+    model = genai.GenerativeModel(model_name)
+    
     prompt = (
         f"You are an expert logistics and lorry dispatch planner.\n"
         f"Generate an optimized lorry dispatch schedule for the '{shift_type}' shift.\n\n"
