@@ -1,0 +1,36 @@
+{
+  "drivers": {
+    "primary": [
+      {"id": "AI882", "name": "Sridhar", "vehicle": "YR 1871E / GBJ 5546"},
+      {"id": "AI879", "name": "Kalingarathnam", "vehicle": "YR 2353C"},
+      {"id": "AI756", "name": "Mahendran", "vehicle": "YR 2216R"},
+      {"id": "AI1056", "name": "K. Pandi", "vehicle": "GBD 3576R"},
+      {"id": "AI933", "name": "Senthil", "vehicle": "GBD 4509D / GBD 3955E"}
+    ],
+    "reserve_staff": [
+      {
+        "id": "AG664",
+        "name": "Saravanan",
+        "vehicle": "GBJ 5546H / GBD 3503B",
+        "rule": "Staff driver. Use ONLY when primary drivers are full. Max 1 trip per day, preferably long-distance single runs (e.g., Tuas or Woodlands)."
+      }
+    ],
+    "blacklisted": ["AI1048", "AG670"]
+  },
+  "route_rules": {
+    "morning": [
+      ["Wuxi Bio (Tuas South Ave 12)", "Jurong Island (Loh & Loh / JEL Sakra Ave)"],
+      ["Tengah Depot (J101)", "Jurong West St 64 (J106)", "Bulim Square (RCC)"],
+      ["Kranji Rd (KWRP)", "Woodlands Checkpoint (Woh Hup)"],
+      ["MOE School Projects"]
+    ],
+    "evening_1900": [
+      ["Jurong West St 64 (J106)", "Bulim Square (RCC)"],
+      ["Kranji Rd (KWRP)", "MOE School Projects"]
+    ],
+    "evening_2100_2200": [
+      ["Tengah Depot (J101)", "Woodlands Checkpoint (Woh Hup)"],
+      ["Wuxi Bio (Tuas South Ave 12)", "Jurong Island (Loh & Loh / JEL Sakra Ave)"]
+    ]
+  }
+}
