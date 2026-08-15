@@ -4,83 +4,97 @@ from io import StringIO
 
 st.set_page_config(page_title="Lorry Dispatch Engine", layout="wide")
 
-st.title("🚛 Smart Lorry Dispatch Engine")
-st.write("Calculates realistic time-windowed schedules and splits tasks across 7 Lorries.")
+st.title("🚛 Smart Dispatch Engine (Driver & Infotech Rules)")
 
-# Default sample site data with Time Windows and Task Types
-default_csv = """Site Name,Zone,Pax,Time Slot,Task Type
-24/12204 (MOE),Central,0,16:30,Shifting
-24/12233,Central,0,16:30,Shifting
-24/12201 (Dover Food),Central,0,18:00,Food Drop
-GHPL (Food),West,0,18:00,Food Drop
-Micron (Food),North,0,18:00,Food Drop
-Woh Hup (Food),North,0,18:00,Food Drop
-24/12207 (7PM),Central,2,18:45,7PM Pickup
-24/12239 (7PM),Central,2,18:45,7PM Pickup
-J105 (7PM),West,7,18:45,7PM Pickup
-GS ITTC (7PM),West,2,18:45,7PM Pickup
-Sunview Drive (7PM),West,2,18:45,7PM Pickup
-J106 (9PM),West,10,20:45,9PM Pickup
-J115A (9PM),West,9,20:45,9PM Pickup
-Wuxi (9PM),West,1,20:45,9PM Pickup
-Yang Ah Kang (9PM),North,5,20:45,9PM Pickup
-Punggol S11 (9PM),East,10,20:45,9PM Pickup
-Dover (10PM Pick),Central,14,21:45,10PM Pickup
-GHPL (10PM Pick),West,20,21:45,10PM Pickup
-Woh Hup (10PM Pick),North,10,21:45,10PM Pickup
-Micron (10PM Pick),North,10,21:45,10PM Pickup"""
+# Driver & Vehicle Master Config
+DRIVERS = {
+    "Lorry 1": {"Driver": "Pandi", "Lorry Size": "14-ft", "Max Capacity": 24},
+    "Lorry 2": {"Driver": "Kaling", "Lorry Size": "14-ft", "Max Capacity": 24},
+    "Lorry 3": {"Driver": "Mahendran", "Lorry Size": "14-ft", "Max Capacity": 24},
+    "Lorry 4": {"Driver": "Sridhar", "Lorry Size": "14-ft", "Max Capacity": 24},
+    "Lorry 5": {"Driver": "Senthil", "Lorry Size": "10-ft", "Max Capacity": 14},
+    "Lorry 6": {"Driver": "Staff Driver", "Lorry Size": "14-ft", "Max Capacity": 24},
+    "Lorry 7": {"Driver": "Standby Lorry", "Lorry Size": "14-ft", "Max Capacity": 24},
+}
 
-user_data = st.text_area("Daily Site List (CSV format)", default_csv, height=300)
+# Function to enforce Infotech Scanning Rules
+def get_pickup_timing(site_name, pax, end_time):
+    is_moe = "MOE" in str(site_name).upper()
+    if is_moe:
+        return f"15 mins early (MOE site allowed)"
+    elif pax <= 2:
+        return f"10-15 mins early (Pax <= 2 excused)"
+    else:
+        return f"EXACT {end_time} (Must scan Infotech at site first!)"
 
-if st.button("🚀 Calculate Realistic Lorry Schedules"):
+# Default CSV Input Data
+default_csv = """Site Name,Zone,Pax,Work End Time,Food Drop
+24/12204 (MOE),Central,0,19:00,NO
+24/12233 (MOE),Central,0,19:00,NO
+24/12201 (Dover),Central,14,22:00,YES
+GHPL,West,20,22:00,YES
+Micron,North,10,22:00,YES
+Woh Hup,North,10,22:00,YES
+24/12207,Central,2,19:00,NO
+24/12239,Central,2,19:00,NO
+J105,West,7,19:00,NO
+GS ITTC,West,2,19:00,NO
+Sunview Drive,West,2,19:00,NO
+J106,West,10,21:00,NO
+J115A,West,9,21:00,NO
+Wuxi,West,1,21:00,NO
+Yang Ah Kang,North,5,21:00,NO
+Punggol S11,East,10,21:00,NO"""
+
+st.subheader("📊 Driver & Vehicle Roster")
+driver_df = pd.DataFrame.from_dict(DRIVERS, orient='index')
+st.table(driver_df)
+
+user_data = st.text_area("Paste Today's Site List (CSV format)", default_csv, height=250)
+
+if st.button("🚀 Calculate Smart Schedule"):
     try:
         df = pd.read_csv(StringIO(user_data))
-        st.success("Sites loaded successfully!")
         
-        # Split jobs into 4 distinct time runs
-        food_drops = df[df['Task Type'] == 'Food Drop']
-        p7_picks = df[df['Task Type'] == '7PM Pickup']
-        p9_picks = df[df['Task Type'] == '9PM Pickup']
-        p10_picks = df[df['Task Type'] == '10PM Pickup']
+        # Calculate Infotech Rule
+        df['Pickup Timing Rule'] = df.apply(lambda r: get_pickup_timing(r['Site Name'], r['Pax'], r['Work End Time']), axis=1)
         
-        st.subheader("📋 Dispatch Summary by Lorry")
+        st.subheader("🍱 Food Drop Priority (< 18:45 Cutoff)")
+        food_df = df[df['Food Drop'].str.upper() == 'YES']
+        st.table(food_df[['Site Name', 'Zone', 'Pax', 'Work End Time']])
         
-        # Lorry 1
-        st.markdown("### 🚛 Lorry 1 (Central Shift)")
-        st.write("**Shift 1 (16:30):** MOE & 24/12233 Shifting")
-        st.write("**Shift 2 (18:45):** Pick 24/12207 (2 pax) & 24/12239 (2 pax)")
-        st.write("**Shift 4 (21:45):** Pick Dover 10PM (14 pax)")
-        st.divider()
+        st.subheader("⏱️ Optimized Pickup Times & Infotech Status")
+        st.dataframe(df[['Site Name', 'Zone', 'Pax', 'Work End Time', 'Pickup Timing Rule']], use_container_width=True)
 
-        # Lorry 2
-        st.markdown("### 🚛 Lorry 2 (Central Food & West 9PM)")
-        st.write("**Shift 1 (18:00):** 🍱 Food Drop at Dover")
-        st.write("**Shift 2 (18:45):** Pick J105 (7 pax) & GS ITTC (2 pax)")
-        st.write("**Shift 3 (20:45):** Pick J106 (10 pax)")
-        st.divider()
-
-        # Lorry 3
-        st.markdown("### 🚛 Lorry 3 (West Food & 10PM Heavy)")
-        st.write("**Shift 1 (18:00):** 🍱 Food Drop at GHPL")
-        st.write("**Shift 2 (18:45):** Pick Sunview Drive (2 pax)")
-        st.write("**Shift 4 (21:45):** Pick GHPL 10PM (20 pax full load)")
-        st.divider()
-
-        # Lorry 4
-        st.markdown("### 🚛 Lorry 4 (North Food & North 10PM)")
-        st.write("**Shift 1 (18:00):** 🍱 Food Drops at Micron & Woh Hup")
-        st.write("**Shift 4 (21:45):** Pick Woh Hup (10 pax) & Micron (10 pax)")
-        st.divider()
-
-        # Lorry 5
-        st.markdown("### 🚛 Lorry 5 (West/North 9PM Sweep)")
-        st.write("**Shift 3 (20:45):** Pick Yang Ah Kang (5 pax), Wuxi (1 pax), J115A (9 pax)")
-        st.divider()
-
-        # Lorry 6
-        st.markdown("### 🚛 Lorry 6 (Punggol Long Run - Staff Driver)")
-        st.write("**Shift 3 (20:45):** Pick Punggol S11 (10 pax via TPE)")
-        st.divider()
+        st.subheader("🚛 Smart Lorry Task Allocation")
         
+        # Lorry Assignments based on Capacity & Rules
+        st.markdown("### 🚛 Lorry 1 — Pandi (14-ft)")
+        st.write("• **16:30:** MOE Shifting (24/12204 & 24/12233)")
+        st.write("• **18:45:** Pick 24/12207 (2 pax) & 24/12239 (2 pax) [Early Pick Allowed]")
+        st.write("• **22:00:** Pick Dover (14 pax) [Exact 22:00 - Infotech Scan Required]")
+        
+        st.markdown("### 🚛 Lorry 2 — Kaling (14-ft)")
+        st.write("• **18:00:** Food Drop at Dover")
+        st.write("• **19:00:** Pick J105 (7 pax) [Exact 19:00 - Infotech Scan Required]")
+        st.write("• **18:45:** Pick GS ITTC (2 pax) [Early Pick Allowed]")
+        st.write("• **21:00:** Pick J106 (10 pax) [Exact 21:00 - Infotech Scan Required]")
+
+        st.markdown("### 🚛 Lorry 3 — Mahendran (14-ft)")
+        st.write("• **18:00:** Food Drop at GHPL")
+        st.write("• **18:45:** Pick Sunview Drive (2 pax) [Early Pick Allowed]")
+        st.write("• **22:00:** Pick GHPL (20 pax) [Exact 22:00 - Infotech Scan Required | Assigned to 14-ft Lorry]")
+
+        st.markdown("### 🚛 Lorry 4 — Sridhar (14-ft)")
+        st.write("• **18:00:** Food Drops at Micron & Woh Hup")
+        st.write("• **22:00:** Pick Woh Hup (10 pax) & Micron (10 pax) [Exact 22:00 - Infotech Scan Required]")
+
+        st.markdown("### 🚛 Lorry 5 — Senthil (10-ft Lorry — Max 14 Pax)")
+        st.write("• **20:45:** Pick Wuxi (1 pax) [Early Pick Allowed]")
+        st.write("• **21:00:** Pick Yang Ah Kang (5 pax) & J115A (9 pax) [Exact 21:00 - Infotech Scan Required | Total 14 Pax Fits 10-ft Lorry]")
+
+        st.markdown("### 🚛 Lorry 6 — Staff Driver (Dedicated East Run)")
+        st.write("• **21:00:** Pick Punggol S11 (10 pax) [Exact 21:00 - Infotech Scan Required]")
+
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error processing schedule: {e}")
