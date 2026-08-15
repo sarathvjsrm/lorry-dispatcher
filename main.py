@@ -11,12 +11,51 @@ st.title("🚚 Daily Lorry Dispatch Generator")
 st.sidebar.header("Configuration")
 api_key_input = st.sidebar.text_input("Gemini API Key", type="password", key="gemini_api_key_input")
 
+# Your exact Spreadsheet ID
 SPREADSHEET_ID = "1AJXN_aUILuokaJhPLCTVb7IIwLnzc3gKpPCmfrJLOdY"
+
+
+def get_clean_records(worksheet):
+    """
+    Safely parses worksheet rows into dictionaries, avoiding errors with empty or duplicate header cells.
+    """
+    all_values = worksheet.get_all_values()
+    if not all_values or len(all_values) < 2:
+        return []
+    
+    raw_headers = all_values[0]
+    clean_headers = []
+    seen_counts = {}
+
+    for idx, header in enumerate(raw_headers):
+        h_text = str(header).strip()
+        if not h_text:
+            h_text = f"Column_{idx + 1}"
+        
+        if h_text in seen_counts:
+            seen_counts[h_text] += 1
+            h_text = f"{h_text}_{seen_counts[h_text]}"
+        else:
+            seen_counts[h_text] = 0
+            
+        clean_headers.append(h_text)
+
+    records = []
+    for row in all_values[1:]:
+        if not any(str(cell).strip() for cell in row):
+            continue
+        row_dict = {}
+        for idx, cell_val in enumerate(row):
+            if idx < len(clean_headers):
+                row_dict[clean_headers[idx]] = cell_val
+        records.append(row_dict)
+
+    return records
 
 
 def load_google_sheet_data():
     """
-    Loads site database and fleet drivers directly by Spreadsheet ID with tab-name fallback.
+    Loads site database and fleet drivers directly by Spreadsheet ID with fallback handling.
     """
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -33,16 +72,19 @@ def load_google_sheet_data():
     worksheets = sheet.worksheets()
     sheet_names = [ws.title for ws in worksheets]
 
-    def get_data_by_name_or_index(preferred_name, fallback_index):
+    def get_worksheet_by_name(preferred_name, fallback_index):
         for ws in worksheets:
             if ws.title.strip().lower() == preferred_name.strip().lower():
-                return ws.get_all_records()
+                return ws
         if len(worksheets) > fallback_index:
-            return worksheets[fallback_index].get_all_records()
+            return worksheets[fallback_index]
         raise ValueError(f"Could not find worksheet '{preferred_name}'. Available tabs: {sheet_names}")
 
-    sites = get_data_by_name_or_index("Site Database", 0)
-    drivers = get_data_by_name_or_index("Fleet_Drivers", 1)
+    site_ws = get_worksheet_by_name("Site Database", 0)
+    driver_ws = get_worksheet_by_name("Fleet_Drivers", 1)
+
+    sites = get_clean_records(site_ws)
+    drivers = get_clean_records(driver_ws)
 
     return sites, drivers
 
