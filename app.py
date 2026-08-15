@@ -1,125 +1,126 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Dynamic Lorry Dispatcher", layout="wide")
+st.set_page_config(page_title="Auto-Zone Lorry Dispatcher", layout="wide")
 
-st.title("🚛 Dynamic Auto-Updating Dispatch Engine")
-st.write("Edit or paste today's site details in the table below. The engine will automatically calculate optimal assignments and track driver OT!")
+st.title("🚛 Smart Lorry Dispatcher (Auto-Zone Lookup)")
+st.write("Pick sites from the dropdown list, key in workers and end times. The engine auto-assigns zones and optimizes lorry schedules.")
 
-# --- DEFAULT INPUT TABLE DATA ---
-default_data = [
-    {"Site Name": "24/12204 (MOE)", "Zone": "Central", "Pax": 0, "Work End Time": "19:00", "Food Drop": "NO"},
-    {"Site Name": "24/12233 (MOE)", "Zone": "Central", "Pax": 0, "Work End Time": "19:00", "Food Drop": "NO"},
-    {"Site Name": "24/12201 (Dover)", "Zone": "Central", "Pax": 14, "Work End Time": "22:00", "Food Drop": "YES"},
-    {"Site Name": "GHPL", "Zone": "West", "Pax": 20, "Work End Time": "22:00", "Food Drop": "YES"},
-    {"Site Name": "Micron", "Zone": "North", "Pax": 10, "Work End Time": "22:00", "Food Drop": "YES"},
-    {"Site Name": "Woh Hup", "Zone": "North", "Pax": 10, "Work End Time": "22:00", "Food Drop": "YES"},
-    {"Site Name": "24/12207", "Zone": "Central", "Pax": 2, "Work End Time": "19:00", "Food Drop": "NO"},
-    {"Site Name": "24/12239", "Zone": "Central", "Pax": 2, "Work End Time": "19:00", "Food Drop": "NO"},
-    {"Site Name": "J105", "Zone": "West", "Pax": 7, "Work End Time": "19:00", "Food Drop": "NO"},
-    {"Site Name": "GS ITTC", "Zone": "West", "Pax": 2, "Work End Time": "19:00", "Food Drop": "NO"},
-    {"Site Name": "Sunview Drive", "Zone": "West", "Pax": 2, "Work End Time": "19:00", "Food Drop": "NO"},
-    {"Site Name": "J106 (24/00199)", "Zone": "West", "Pax": 10, "Work End Time": "19:00", "Food Drop": "NO"},
-    {"Site Name": "J115A", "Zone": "West", "Pax": 9, "Work End Time": "21:00", "Food Drop": "NO"},
-    {"Site Name": "Wuxi", "Zone": "West", "Pax": 1, "Work End Time": "21:00", "Food Drop": "NO"},
-    {"Site Name": "Yang Ah Kang", "Zone": "North", "Pax": 5, "Work End Time": "21:00", "Food Drop": "NO"},
-    {"Site Name": "Punggol S11", "Zone": "East", "Pax": 10, "Work End Time": "21:00", "Food Drop": "NO"},
+# --- MASTER SITE DATABASE (Auto-Zone Lookup) ---
+# Add any new sites and their zones here in the future
+SITE_MASTER_DB = {
+    "24/12204 (MOE)": "Central",
+    "24/12233 (MOE)": "Central",
+    "24/12201 (Dover)": "Central",
+    "24/12207": "Central",
+    "24/12239": "Central",
+    "GHPL": "West",
+    "J105": "West",
+    "GS ITTC": "West",
+    "Sunview Drive": "West",
+    "J106 (24/00199)": "West",
+    "J115A": "West",
+    "Wuxi": "West",
+    "Micron": "North",
+    "Woh Hup": "North",
+    "Work Up": "North",
+    "Yang Ah Kang": "North",
+    "Punggol S11": "East",
+}
+
+site_options = list(SITE_MASTER_DB.keys())
+
+# --- DEFAULT DAILY INPUT TABLE ---
+default_rows = [
+    {"Site Name": "24/12204 (MOE)", "Pax": 0, "Work End Time": "19:00", "Food Drop": "NO"},
+    {"Site Name": "24/12233 (MOE)", "Pax": 0, "Work End Time": "19:00", "Food Drop": "NO"},
+    {"Site Name": "24/12201 (Dover)", "Pax": 14, "Work End Time": "22:00", "Food Drop": "YES"},
+    {"Site Name": "GHPL", "Pax": 20, "Work End Time": "22:00", "Food Drop": "YES"},
+    {"Site Name": "Micron", "Pax": 10, "Work End Time": "22:00", "Food Drop": "YES"},
+    {"Site Name": "Woh Hup", "Pax": 10, "Work End Time": "22:00", "Food Drop": "YES"},
+    {"Site Name": "24/12207", "Pax": 2, "Work End Time": "19:00", "Food Drop": "NO"},
+    {"Site Name": "24/12239", "Pax": 2, "Work End Time": "19:00", "Food Drop": "NO"},
+    {"Site Name": "J105", "Pax": 7, "Work End Time": "19:00", "Food Drop": "NO"},
+    {"Site Name": "GS ITTC", "Pax": 2, "Work End Time": "19:00", "Food Drop": "NO"},
+    {"Site Name": "Sunview Drive", "Pax": 2, "Work End Time": "19:00", "Food Drop": "NO"},
+    {"Site Name": "J106 (24/00199)", "Pax": 10, "Work End Time": "19:00", "Food Drop": "NO"},
+    {"Site Name": "J115A", "Pax": 9, "Work End Time": "21:00", "Food Drop": "NO"},
+    {"Site Name": "Wuxi", "Pax": 1, "Work End Time": "21:00", "Food Drop": "NO"},
+    {"Site Name": "Yang Ah Kang", "Pax": 5, "Work End Time": "21:00", "Food Drop": "NO"},
+    {"Site Name": "Punggol S11", "Pax": 10, "Work End Time": "21:00", "Food Drop": "NO"},
 ]
 
-# Create editable data table
-st.subheader("📝 Edit Today's Sites (Add/Delete/Change Pax or Times)")
-df_input = pd.DataFrame(default_data)
+st.subheader("📋 Select Sites & Enter Today's Operational Details")
 
-# Interactive grid for user input
+df_input = pd.DataFrame(default_rows)
+
+# Interactive editor with dropdown menu for Site Names
 edited_df = st.data_editor(
     df_input,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "Food Drop": st.column_config.SelectboxColumn("Food Drop", options=["YES", "NO"]),
-        "Zone": st.column_config.SelectboxColumn("Zone", options=["West", "North", "Central", "East"]),
-        "Pax": st.column_config.NumberColumn("Pax", min_value=0, max_value=30),
+        "Site Name": st.column_config.SelectboxColumn("Site Name", options=site_options, required=True),
+        "Pax": st.column_config.NumberColumn("Pax (Workers)", min_value=0, max_value=30, step=1, default=0),
+        "Work End Time": st.column_config.SelectboxColumn("Work End Time", options=["19:00", "21:00", "22:00", "16:30"], required=True),
+        "Food Drop": st.column_config.SelectboxColumn("Food Drop", options=["YES", "NO"], required=True),
     }
 )
 
-# --- DYNAMIC CALCULATION LOGIC ---
-if st.button("⚡ Generate Auto-Updated Dispatch & OT Plan"):
+# --- AUTOMATIC CALCULATION & DISPATCH ENGINE ---
+if st.button("🚀 Auto-Assign Zones & Generate Dispatch Schedule"):
     
-    # 1. Apply Infotech timing rules dynamically
-    def determine_timing_rule(row):
+    # Auto-assign Zone based on Site Database
+    edited_df["Zone"] = edited_df["Site Name"].map(SITE_MASTER_DB).fillna("Unknown")
+
+    # Determine Infotech Scanning Timing Rule
+    def timing_rule(row):
         site = str(row["Site Name"]).upper()
         pax = row["Pax"]
         end_time = row["Work End Time"]
         
         if "MOE" in site:
-            return "Early Pick Allowed (MOE Site)"
+            return "15 Mins Early (MOE Allowed)"
         elif pax <= 2:
-            return "Early Pick Allowed (Pax <= 2)"
+            return "15 Mins Early (Pax <= 2 Excused)"
         else:
-            return f"EXACT {end_time} (Must scan Infotech at site)"
+            return f"EXACT {end_time} (Must Scan Infotech at Site)"
 
-    edited_df["Infotech Rule"] = edited_df.apply(determine_timing_rule, axis=1)
+    edited_df["Timing Rule"] = edited_df.apply(timing_rule, axis=1)
 
-    # 2. Extract 10 PM OT Sites dynamically for Driver OT Tracker
-    ot_10pm_sites = edited_df[edited_df["Work End Time"].astype(str).str.contains("22:00|10 PM|10pm|22")]
+    # Sidebar OT Tracking
+    st.sidebar.header("⚖️ Live Driver OT Status")
+    ot_10pm = edited_df[edited_df["Work End Time"] == "22:00"]
     
-    # --- SIDEBAR: DYNAMIC OT FAIRNESS TRACKER ---
-    st.sidebar.header("⚖️ Live Daily OT Tracker")
-    st.sidebar.write("Auto-calculated from today's inputs:")
-    
-    # Track who gets heavy 10 PM OT
-    assigned_10pm_drivers = []
-    
-    for idx, row in ot_10pm_sites.iterrows():
+    for _, row in ot_10pm.iterrows():
         pax = row["Pax"]
         site = row["Site Name"]
         if pax > 14:
-            driver_recommendation = f"Mahendran / Pandi (14-ft for {pax} pax)"
+            st.sidebar.success(f"**{site} ({pax} pax)**\n👉 Must use 14-ft Lorry (Mahendran / Pandi)")
         else:
-            driver_recommendation = f"Senthil / Kaling / Sridhar (Max {pax} pax)"
-        st.sidebar.success(f"**{site} ({pax} pax)**\n👉 Assigned: {driver_recommendation}")
+            st.sidebar.info(f"**{site} ({pax} pax)**\n👉 Can use 10-ft (Senthil) or 14-ft Lorry")
 
-    st.sidebar.info("💡 **OT Rule:** Driver doing 9 PM today gets priority for 10 PM tomorrow!")
+    st.sidebar.warning("⚠️ **OT Rule:** Sridhar (9 PM today) gets priority for 10 PM OT tomorrow!")
 
-    # --- MAIN DISPATCH DISPLAY ---
+    # Master Output Display
     st.divider()
-    st.subheader("📊 Auto-Calculated Site Rules Summary")
-    st.dataframe(edited_df[["Site Name", "Zone", "Pax", "Work End Time", "Food Drop", "Infotech Rule"]], use_container_width=True)
+    st.subheader("📍 Auto-Zoned Daily Site List")
+    st.dataframe(edited_df[["Site Name", "Zone", "Pax", "Work End Time", "Food Drop", "Timing Rule"]], use_container_width=True)
 
-    st.subheader("🚚 Dynamic Driver Assignments")
+    # Shifts Breakdown
+    col1, col2, col3 = st.columns(3)
 
-    # Group by Food Drops
-    food_df = edited_df[edited_df["Food Drop"] == "YES"]
-    if not food_df.empty:
-        st.markdown("### 🍱 Pre-18:45 Food Deliveries")
-        st.table(food_df[["Site Name", "Zone", "Work End Time"]])
+    with col1:
+        st.markdown("### 🟢 7:00 PM Pickups")
+        p7 = edited_df[edited_df["Work End Time"] == "19:00"]
+        st.table(p7[["Site Name", "Zone", "Pax", "Timing Rule"]])
 
-    # Process 7 PM, 9 PM, 10 PM groups dynamically
-    st.markdown("### ⏱️ Pickup Shifts")
-    
-    p7 = edited_df[edited_df["Work End Time"].astype(str).str.contains("19:00|7 PM|7pm|19")]
-    p9 = edited_df[edited_df["Work End Time"].astype(str).str.contains("21:00|9 PM|9pm|21")]
-    p10 = edited_df[edited_df["Work End Time"].astype(str).str.contains("22:00|10 PM|10pm|22")]
-    
-    col_a, col_b, col_c = st.columns(3)
-    
-    with col_a:
-        st.markdown("#### 🟢 7:00 PM Pickups")
-        if not p7.empty:
-            st.table(p7[["Site Name", "Pax", "Zone"]])
-        else:
-            st.write("No 7 PM pickups today.")
-            
-    with col_b:
-        st.markdown("#### 🟡 9:00 PM Pickups")
-        if not p9.empty:
-            st.table(p9[["Site Name", "Pax", "Zone"]])
-        else:
-            st.write("No 9 PM pickups today.")
+    with col2:
+        st.markdown("### 🟡 9:00 PM Pickups")
+        p9 = edited_df[edited_df["Work End Time"] == "21:00"]
+        st.table(p9[["Site Name", "Zone", "Pax", "Timing Rule"]])
 
-    with col_c:
-        st.markdown("#### 🔴 10:00 PM Pickups (Max OT)")
-        if not p10.empty:
-            st.table(p10[["Site Name", "Pax", "Zone"]])
-        else:
-            st.write("No 10 PM pickups today.")
+    with col3:
+        st.markdown("### 🔴 10:00 PM Pickups (Max OT)")
+        p10 = edited_df[edited_df["Work End Time"] == "22:00"]
+        st.table(p10[["Site Name", "Zone", "Pax", "Timing Rule"]])
