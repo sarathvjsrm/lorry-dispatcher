@@ -4,7 +4,7 @@ import pandas as pd
 st.set_page_config(page_title="Lorry Dispatcher - Site Database Integration", layout="wide")
 
 st.title("🚛 Master Lorry Dispatcher Engine")
-st.write("Select sites from the drop-down menu for today's jobs. Key in **Pax** and **Work End Time** across the 25 rows below.")
+st.write("Select sites from the drop-down menu for today's jobs. Key in **Pax** and manually enter **Work End Time** (e.g., 6:45, 18:45, 19:00).")
 
 # --- MASTER DATABASE FROM EXCEL SHEET ---
 SITE_DATABASE = {
@@ -101,7 +101,7 @@ st.subheader("📋 Enter Today's Schedule (25 Rows Available)")
 
 df_input = pd.DataFrame(blank_rows)
 
-# Interactive grid with Site Database Drop-down across 25 blank rows
+# Interactive grid with Manual Text Entry for Work End Time
 edited_df = st.data_editor(
     df_input,
     num_rows="dynamic",
@@ -109,31 +109,61 @@ edited_df = st.data_editor(
     column_config={
         "Site Name": st.column_config.SelectboxColumn("Site Name (Database Dropdown)", options=site_dropdown_options, required=False),
         "Pax": st.column_config.NumberColumn("Pax (Workers)", min_value=0, max_value=30, step=1, default=0),
-        "Work End Time": st.column_config.SelectboxColumn("Work End Time", options=["19:00", "21:00", "22:00", "16:30"], default="19:00"),
+        "Work End Time": st.column_config.TextColumn("Work End Time (e.g. 19:00, 6:45)", default="19:00", help="Manually type work end time"),
         "Food Drop": st.column_config.SelectboxColumn("Food Drop Required", options=["YES", "NO"], default="NO"),
     }
 )
 
+# Helper function to categorize custom time entries into display columns
+def parse_time_category(time_str):
+    if not time_str:
+        return "7PM"
+    
+    clean_str = str(time_str).strip().lower().replace(" ", "").replace("pm", "").replace("am", "")
+    try:
+        if ":" in clean_str:
+            parts = clean_str.split(":")
+            hour = int(parts[0])
+            minute = int(parts[1])
+        else:
+            hour = int(clean_str)
+            minute = 0
+            
+        # Convert 12-hour format to 24-hour equivalent for early evening numbers (e.g., 6:45 -> 18:45)
+        if 1 <= hour <= 6:
+            hour += 12
+        elif hour in [7, 8, 9, 10]:
+            # User typed standard 7, 9, 10
+            pass
+
+        # Time slot threshold categorization
+        if hour < 19 or (hour == 19 and minute == 0):
+            return "7PM"
+        elif hour < 21 or (hour == 21 and minute == 0):
+            return "9PM"
+        else:
+            return "10PM"
+    except:
+        return "7PM"
+
 # --- AUTO-LOOKUP AND DISPATCH LOGIC ---
 if st.button("🚀 Calculate Smart Routes & OT Plan"):
     
-    # Filter out empty rows where no Site Name was selected
     active_df = edited_df.dropna(subset=["Site Name"]).copy()
     active_df = active_df[active_df["Site Name"] != ""]
     
     if active_df.empty:
         st.warning("⚠️ Please select at least one site from the drop-down before calculating!")
     else:
-        # Auto-fetch Address, Travel Time, and Zone from SITE_DATABASE
         active_df["Address"] = active_df["Site Name"].apply(lambda s: SITE_DATABASE.get(s, {}).get("address", "Unknown"))
         active_df["Travel Time (min)"] = active_df["Site Name"].apply(lambda s: SITE_DATABASE.get(s, {}).get("travel_min", 40))
         active_df["Zone"] = active_df["Site Name"].apply(lambda s: SITE_DATABASE.get(s, {}).get("zone", "Central"))
 
-        # Determine Infotech timing rules
+        # Infotech rule check
         def determine_rule(row):
             site = str(row["Site Name"]).upper()
             pax = row["Pax"]
-            end_time = row["Work End Time"]
+            end_time = str(row["Work End Time"]).strip()
             
             if "MOE" in site:
                 return "Early Pickup OK (MOE Site)"
@@ -144,21 +174,36 @@ if st.button("🚀 Calculate Smart Routes & OT Plan"):
 
         active_df["Infotech Rule"] = active_df.apply(determine_rule, axis=1)
 
+        # Auto driver assignment
+        def auto_assign_driver(row):
+            pax = row["Pax"]
+            zone = row["Zone"]
+            
+            if pax > 14:
+                return "14-ft Lorry (Mahendran / Pandi)"
+            elif pax > 4:
+                return "10-ft Lorry (Senthil)"
+            elif zone == "North":
+                return "10-ft Lorry (North Driver)"
+            else:
+                return "10-ft Lorry / Van (Senthil)"
+
+        active_df["Assigned Driver"] = active_df.apply(auto_assign_driver, axis=1)
+        active_df["Time Bucket"] = active_df["Work End Time"].apply(parse_time_category)
+
         # --- SIDEBAR: AUTOMATIC OT TRACKER ---
         st.sidebar.header("⚖️ Live Driver OT Rotation")
         st.sidebar.write("Calculated based on today's inputs:")
         
-        p10_runs = active_df[active_df["Work End Time"] == "22:00"]
+        p10_runs = active_df[active_df["Time Bucket"] == "10PM"]
         if p10_runs.empty:
             st.sidebar.write("No 10 PM OT runs entered for today.")
         else:
             for idx, row in p10_runs.iterrows():
                 pax = row["Pax"]
                 site = row["Site Name"]
-                if pax > 14:
-                    st.sidebar.success(f"**{site} ({pax} pax)**\n👉 Assign 14-ft Lorry (Mahendran/Pandi)")
-                else:
-                    st.sidebar.info(f"**{site} ({pax} pax)**\n👉 Assign 10-ft (Senthil) or 14-ft Lorry")
+                driver = row["Assigned Driver"]
+                st.sidebar.success(f"**{site} ({pax} pax)**\n👉 {driver}")
 
         st.sidebar.warning("⚠️ **OT Fairness Rule:** Driver taking 9 PM run today gets priority for 10 PM OT tomorrow!")
 
@@ -166,32 +211,32 @@ if st.button("🚀 Calculate Smart Routes & OT Plan"):
         st.divider()
         st.subheader("📊 Auto-Populated Active Dispatch Schedule")
         
-        display_cols = ["Site Name", "Address", "Zone", "Pax", "Work End Time", "Travel Time (min)", "Food Drop", "Infotech Rule"]
+        display_cols = ["Site Name", "Address", "Zone", "Pax", "Work End Time", "Travel Time (min)", "Assigned Driver", "Food Drop", "Infotech Rule"]
         st.dataframe(active_df[display_cols], use_container_width=True)
 
         # --- TIME SLOTS DISPLAY ---
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.markdown("### 🟢 7:00 PM Pickups")
-            p7 = active_df[active_df["Work End Time"] == "19:00"]
+            st.markdown("### 🟢 Early / 7:00 PM Pickups")
+            p7 = active_df[active_df["Time Bucket"] == "7PM"]
             if not p7.empty:
-                st.table(p7[["Site Name", "Zone", "Pax", "Travel Time (min)"]])
+                st.table(p7[["Site Name", "Work End Time", "Zone", "Pax", "Travel Time (min)", "Assigned Driver"]])
             else:
-                st.write("No 7 PM pickups scheduled.")
+                st.write("No early / 7 PM pickups scheduled.")
 
         with col2:
             st.markdown("### 🟡 9:00 PM Pickups")
-            p9 = active_df[active_df["Work End Time"] == "21:00"]
+            p9 = active_df[active_df["Time Bucket"] == "9PM"]
             if not p9.empty:
-                st.table(p9[["Site Name", "Zone", "Pax", "Travel Time (min)"]])
+                st.table(p9[["Site Name", "Work End Time", "Zone", "Pax", "Travel Time (min)", "Assigned Driver"]])
             else:
                 st.write("No 9 PM pickups scheduled.")
 
         with col3:
             st.markdown("### 🔴 10:00 PM Pickups (Max OT)")
-            p10 = active_df[active_df["Work End Time"] == "22:00"]
+            p10 = active_df[active_df["Time Bucket"] == "10PM"]
             if not p10.empty:
-                st.table(p10[["Site Name", "Zone", "Pax", "Travel Time (min)"]])
+                st.table(p10[["Site Name", "Work End Time", "Zone", "Pax", "Travel Time (min)", "Assigned Driver"]])
             else:
                 st.write("No 10 PM pickups scheduled.")
