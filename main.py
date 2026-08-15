@@ -9,7 +9,7 @@ st.title("🚚 Daily Lorry Dispatch Generator")
 
 # Sidebar for Gemini API Key input
 st.sidebar.header("Configuration")
-api_key_input = st.sidebar.text_input("Gemini API Key", type="password")
+api_key_input = st.sidebar.text_input("Gemini API Key", type="password", key="gemini_api_key_input")
 
 SPREADSHEET_ID = "1AJXN_aUILuokaJhPLCTVb7IIwLnzc3gKpPCmfrJLOdY"
 
@@ -33,7 +33,6 @@ def load_google_sheet_data():
     worksheets = sheet.worksheets()
     sheet_names = [ws.title for ws in worksheets]
 
-    # Flexible matching by tab name (case & space insensitive) or fallback to index position
     def get_data_by_name_or_index(preferred_name, fallback_index):
         for ws in worksheets:
             if ws.title.strip().lower() == preferred_name.strip().lower():
@@ -77,9 +76,10 @@ shift_type = st.selectbox(
         "AFTERNOON_1500_2300",
         "NIGHT_2300_0700",
     ],
+    key="shift_type_select"
 )
 
-if st.button("Generate Dispatch Schedule"):
+if st.button("Generate Dispatch Schedule", key="generate_schedule_btn"):
     if not api_key_input:
         st.error("Please enter your Gemini API Key in the sidebar.")
     else:
