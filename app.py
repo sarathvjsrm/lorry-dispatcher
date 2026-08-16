@@ -31,13 +31,11 @@ def load_google_sheet_data():
         
     client = gspread.service_account_from_dict(creds_dict, scopes=scopes)
     
-    # Implement retry backoff to handle Google Sheets 429 Rate Limits gracefully
     max_retries = 3
     for attempt in range(max_retries):
         try:
             sheet = client.open_by_key(SPREADSHEET_ID)
             
-            # Fetch all worksheet values in a structured sequence with minimal overhead
             daily_ops_ws = sheet.worksheet("Daily_Ops")
             site_ws = sheet.worksheet("Site_Database")
             driver_ws = sheet.worksheet("Fleet_Drivers")
@@ -61,41 +59,43 @@ def generate_dynamic_schedule(api_key, shift_type):
     genai.configure(api_key=api_key)
     daily_ops_data, sites, drivers = load_google_sheet_data()
 
-    # 1. Format Daily Ops into readable text for any given day
     daily_ops_text = "\n".join([" | ".join([str(cell).strip() for cell in row]) for row in daily_ops_data if any(row)])
 
-    # 2. Extract REAL Driver Names programmatically to force the AI to use them
-    driver_names_list = []
+    # Define your main 5 drivers based on your database screenshot
+    primary_driver_names = ["Mahendran", "Sridhar", "Kailing", "Senthil", "Pandi"]
+    
+    all_driver_names = []
     for d in drivers:
         name = d.get("Driver Name", d.get("Name", d.get("Driver", str(list(d.values())[0]))))
-        driver_names_list.append(name)
-    
-    active_drivers_string = ", ".join(driver_names_list)
+        if name and name.strip():
+            all_driver_names.append(name.strip())
 
-    # 3. The Bulletproof Dynamic Prompt
+    primary_string = ", ".join(primary_driver_names)
+    all_string = ", ".join(all_driver_names)
+
     prompt = (
         f"You are a master Logistics AI. You are generating a schedule for the '{shift_type}' shift.\n\n"
         f"--- TODAY'S DYNAMIC WORKLOAD ---\n{daily_ops_text}\n\n"
         f"--- SITE DATABASE (COORDINATES) ---\n{sites}\n\n"
-        f"--- ACTIVE FLEET DRIVERS ---\n{drivers}\n\n"
+        f"--- FLEET DRIVERS DATABASE ---\n{drivers}\n\n"
         
         f"CRITICAL SYSTEM RULES (MUST OBEY):\n"
-        f"1. REAL DRIVER NAMES ONLY: You are strictly forbidden from using 'Driver 1', 'Driver 2', etc. "
-        f"You MUST assign jobs using ONLY these active names from the database: {active_drivers_string}.\n"
-        f"2. MATHEMATICAL BALANCING: Look at the total number of sites in Today's Workload. You MUST distribute these sites evenly across the active drivers. Do not overload one driver while leaving another empty.\n"
-        f"3. DYNAMIC DINNER DELIVERY: Identify ANY site in Today's Workload ending at 22:00. You MUST assign a specific driver (by their real name) to deliver food to them before pickup.\n"
+        f"1. DRIVER PRIORITY TIER:\n"
+        f"   - PRIMARY TIER (Use these 5 first): {primary_string}.\n"
+        f"   - BACKUP / STAFF TIER (Use these additional drivers ONLY if the workload is too heavy or difficult to cover with the primary 5): {all_string}.\n"
+        f"2. WORKLOAD BALANCING & OVERFLOW: Assign sites primarily to the 5 main drivers. If there are too many sites for 5 drivers to handle efficiently, overflow the remaining sites to the additional staff drivers from the database.\n"
+        f"3. DYNAMIC DINNER DELIVERY: Identify ANY site in Today's Workload ending at 22:00. You MUST assign a specific driver to deliver food to them before pickup.\n"
         f"4. TRAVEL REALITY: Use the Latitude/Longitude from the Site Database. Do not assign sites that are geographically impossible to reach sequentially.\n\n"
         
         f"OUTPUT FORMAT (Provide exactly these 3 sections in Markdown):\n\n"
         f"### 🍽️ DINNER DELIVERY ASSIGNMENTS\n"
         f"(Table: Site Name | Dinner Driver (Real Name) | Vehicle)\n\n"
-        f"### ⚖️ WORKLOAD BALANCING AUDIT\n"
-        f"(Briefly list each active driver by name and state exactly how many sites they were assigned to prove the load is balanced.)\n\n"
+        f"### ⚖️ WORKLOAD BALANCING & TIER AUDIT\n"
+        f"(Briefly explain which primary drivers were used, and state whether additional staff drivers were needed for overflow.)\n\n"
         f"### 🚚 DYNAMIC DISPATCH SCHEDULE\n"
         f"(Table: Driver Name (Real Name) | Vehicle | Assigned Sites & Times | Total Workers)\n"
     )
 
-    # Updated to gemini-3.5-flash
     model = genai.GenerativeModel("gemini-3.5-flash")
     response = model.generate_content(
         prompt,
@@ -110,7 +110,7 @@ if st.button("Generate Dynamic Schedule"):
     if not api_key_input:
         st.error("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Extracting real names, balancing workload mathematically, and routing..."):
+        with st.spinner("Prioritizing main 5 drivers, evaluating workload overflow, and routing..."):
             try:
                 schedule_output = generate_dynamic_schedule(api_key_input, shift_selection)
                 st.success("Schedule Generated Successfully!")
