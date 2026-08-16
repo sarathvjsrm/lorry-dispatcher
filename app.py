@@ -61,7 +61,6 @@ def generate_dynamic_schedule(api_key, shift_type):
 
     daily_ops_text = "\n".join([" | ".join([str(cell).strip() for cell in row]) for row in daily_ops_data if any(row)])
 
-    # Parse and build clear capacity map for each driver
     driver_specs = []
     for d in drivers:
         name = d.get("Driver No.", d.get("Driver Name", d.get("Name", ""))).strip()
@@ -84,17 +83,17 @@ def generate_dynamic_schedule(api_key, shift_type):
         f"--- SITE DATABASE (COORDINATES & DETAILS) ---\n{sites}\n\n"
         f"--- FLEET DRIVERS & STRICT LEGAL CAPACITIES ---\n{drivers_summary_text}\n\n"
         
-        f"CRITICAL SAFETY & SYSTEM RULES (MUST OBEY OR IT IS AN ILLEGAL DISPATCH):\n"
-        f"1. STRICT MAXIMUM CAPACITY LAW: You are legally FORBIDDEN from assigning a total worker count to any driver that exceeds their 'Max Legal Capacity' specified in the fleet database above (e.g., Senthil's max capacity is 14 pax, do NOT overload him past 14 under any circumstance!).\n"
-        f"2. DRIVER PRIORITY & OVERFLOW: Use the primary 5 drivers first ({primary_string}). If a site's worker count or total workload exceeds a driver's legal capacity or geographic reach, split the loads properly or overflow to additional staff drivers from the database.\n"
-        f"3. GEOGRAPHIC & TIMING REALITY: Use the Latitude/Longitude from the Site Database. Sequential site pickups must be physically reachable within the given time windows. Do not schedule impossible sequential hops.\n"
-        f"4. DYNAMIC DINNER DELIVERY: Identify ANY site ending at 22:00. Assign a driver to deliver food before pickup.\n\n"
+        f"CRITICAL OPERATIONAL RULES (MUST OBEY):\n"
+        f"1. LOGICAL MEAL/DINNER DELIVERY TIMING: Workers must receive their food BEFORE their break starts (e.g., if break/pickup is around 19:00, food delivery must arrive by 18:15 - 18:30 at the latest!). Never schedule a food delivery *after* the meal break time.\n"
+        f"2. STRICT MAXIMUM CAPACITY LAW: You are legally FORBIDDEN from assigning a worker count to any driver exceeding their 'Max Legal Capacity' (e.g., Senthil max is 14 pax, do NOT overload him).\n"
+        f"3. DRIVER PRIORITY: Use the primary 5 drivers first ({primary_string}).\n"
+        f"4. GEOGRAPHIC & TIMING REALITY: Use the Latitude/Longitude from the Site Database to ensure sequential pickups are physically possible.\n\n"
         
         f"OUTPUT FORMAT (Provide exactly these 3 sections in Markdown):\n\n"
-        f"### 🍽️ DINNER DELIVERY ASSIGNMENTS\n"
-        f"(Table: Site Name | Dinner Driver (Real Name) | Vehicle)\n\n"
-        f"### ⚖️ LEGAL CAPACITY & WORKLOAD AUDIT\n"
-        f"(List each driver used, their Max Legal Capacity, their Assigned Total Workers, and explicitly verify that NO driver exceeded their legal limit.)\n\n"
+        f"### 🍽️ MEAL / DINNER DELIVERY ASSIGNMENTS\n"
+        f"(Table: Site Name | Driver Name | Vehicle | Delivery Arrival Time - Must be before break)\n\n"
+        f"### ⚖️ LEGAL CAPACITY & TIMING AUDIT\n"
+        f"(Verify that all meal deliveries arrive before break times and that no driver exceeds capacity limits.)\n\n"
         f"### 🚚 DYNAMIC DISPATCH SCHEDULE\n"
         f"(Table: Driver Name | Vehicle | Assigned Sites & Times | Total Workers | Capacity Check Status)\n"
     )
@@ -113,7 +112,7 @@ if st.button("Generate Dynamic Schedule"):
     if not api_key_input:
         st.error("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Checking legal capacities against database limits, verifying coordinates, and routing..."):
+        with st.spinner("Enforcing strict meal delivery pre-break timelines, capacities, and routing..."):
             try:
                 schedule_output = generate_dynamic_schedule(api_key_input, shift_selection)
                 st.success("Schedule Generated Successfully!")
