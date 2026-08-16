@@ -1,37 +1,205 @@
 {
-  "drivers": {
-    "primary": [
-      {"id": "AI882", "name": "Sridhar", "vehicle": "YR 1871E / GBJ 5546"},
-      {"id": "AI879", "name": "Kalingarathnam", "vehicle": "YR 2353C"},
-      {"id": "AI756", "name": "Mahendran", "vehicle": "YR 2216R"},
-      {"id": "AI1056", "name": "K. Pandi", "vehicle": "GBD 3576R"},
-      {"id": "AI933", "name": "Senthil", "vehicle": "GBD 4509D / GBD 3955E"}
-    ],
-    "staff_flex": [
-      {
-        "id": "AG664",
-        "name": "Saravanan",
-        "vehicle": "GBJ 5546H / GBD 3503B",
-        "role": "Staff Driver",
-        "assignment_preference": "Long-distance sites (Tuas, Jurong Island, Woodlands) or on-demand/overflow runs. Unlimited trips based on operational need."
-      }
-    ],
-    "blacklisted": ["AI1048", "AG670"]
+  "shift_info": {
+    "shift_name": "AFTERNOON_1500_2300",
+    "shift_duration": "15:00 - 23:00"
   },
-  "route_rules": {
-    "morning": [
-      ["Wuxi Bio (Tuas South Ave 12)", "Jurong Island (Loh & Loh / JEL Sakra Ave)"],
-      ["Tengah Depot (J101)", "Jurong West St 64 (J106)", "Bulim Square (RCC)"],
-      ["Kranji Rd (KWRP)", "Woodlands Checkpoint (Woh Hup)"],
-      ["MOE School Projects"]
-    ],
-    "evening_1900": [
-      ["Jurong West St 64 (J106)", "Bulim Square (RCC)"],
-      ["Kranji Rd (KWRP)", "MOE School Projects"]
-    ],
-    "evening_2100_2200": [
-      ["Tengah Depot (J101)", "Woodlands Checkpoint (Woh Hup)"],
-      ["Wuxi Bio (Tuas South Ave 12)", "Jurong Island (Loh & Loh / JEL Sakra Ave)"]
-    ]
-  }
+  "dispatch_schedule": [
+    {
+      "driver_details": {
+        "driver_number": "Driver 1",
+        "vehicle_code": "14ft",
+        "capacity": 25,
+        "region": "West (Jurong)"
+      },
+      "assigned_sites": [
+        {
+          "name": "J106 - Jurong West St 64 [J106-INTERNAL]",
+          "end_time": "21:00",
+          "workers": 11,
+          "special_rules": "Geographic grouping: Jurong West Cluster"
+        },
+        {
+          "name": "J105 - 268A Boon Lay Dr [J105-INTERNAL]",
+          "end_time": "21:00",
+          "workers": 6,
+          "special_rules": "Geographic grouping: Jurong West Cluster"
+        }
+      ],
+      "total_workers": 17,
+      "utilization_status": "OK"
+    },
+    {
+      "driver_details": {
+        "driver_number": "Driver 2",
+        "vehicle_code": "14ft",
+        "capacity": 25,
+        "region": "North (Kranji/Woodlands)"
+      },
+      "assigned_sites": [
+        {
+          "name": "Yang Ah Kang [26/00078]",
+          "end_time": "21:00",
+          "workers": 5,
+          "special_rules": "Isolated North site"
+        }
+      ],
+      "total_workers": 5,
+      "utilization_status": "OK"
+    },
+    {
+      "driver_details": {
+        "driver_number": "Driver 3",
+        "vehicle_code": "14ft",
+        "capacity": 25,
+        "region": "West/Central (Tuas/ACJC)"
+      },
+      "assigned_sites": [
+        {
+          "name": "Anglo-Chinese Junior College [24/12201]",
+          "end_time": "19:00",
+          "workers": 6,
+          "special_rules": "Central site prioritization"
+        }
+      ],
+      "total_workers": 6,
+      "utilization_status": "OK"
+    },
+    {
+      "driver_details": {
+        "driver_number": "Driver 4",
+        "vehicle_code": "10ft",
+        "capacity": 14,
+        "region": "Central (Halifax)"
+      },
+      "assigned_sites": [
+        {
+          "name": "ITTC-GS [22/00042]",
+          "end_time": "19:00",
+          "workers": 2,
+          "special_rules": "Central/School Cluster Sweep"
+        },
+        {
+          "name": "WOH HUP (PRIVATE) LIMITED [25/00212]",
+          "end_time": "19:00",
+          "workers": 2,
+          "special_rules": "Central/School Cluster Sweep"
+        },
+        {
+          "name": "CHIJ Our Lady Queen Of Peace [24/12210]",
+          "end_time": "19:00",
+          "workers": 2,
+          "special_rules": "Central/School Cluster Sweep"
+        },
+        {
+          "name": "Hua Yi Secondary School [24/12220]",
+          "end_time": "19:00",
+          "workers": 3,
+          "special_rules": "Central/School Cluster Sweep"
+        }
+      ],
+      "total_workers": 9,
+      "utilization_status": "OK"
+    },
+    {
+      "driver_details": {
+        "driver_number": "Driver 5",
+        "vehicle_code": "14ft",
+        "capacity": 25,
+        "region": "West (Semangka/PPT)"
+      },
+      "assigned_sites": [
+        {
+          "name": "GHPL - Lor Semangka [GHPL-INTERNAL]",
+          "end_time": "21:00",
+          "workers": 18,
+          "special_rules": "West Cluster high volume"
+        },
+        {
+          "name": "S11 - PPTL1B [25/00025]",
+          "end_time": "21:00",
+          "workers": 3,
+          "special_rules": "West Cluster grouping"
+        }
+      ],
+      "total_workers": 21,
+      "utilization_status": "OK"
+    },
+    {
+      "driver_details": {
+        "driver_number": "Driver 6",
+        "vehicle_code": "10ft",
+        "capacity": 14,
+        "region": "West (Nanyang Dr)"
+      },
+      "assigned_sites": [
+        {
+          "name": "Jurongville Secondary School [24/12226]",
+          "end_time": "19:00",
+          "workers": 2,
+          "special_rules": "Time optimization: 19:00 route first"
+        },
+        {
+          "name": "Jurong Secondary School [24/12223]",
+          "end_time": "19:00",
+          "workers": 3,
+          "special_rules": "Time optimization: 19:00 route first"
+        },
+        {
+          "name": "J115A - Nanyang Dr [J115A-INTERNAL]",
+          "end_time": "21:00",
+          "workers": 7,
+          "special_rules": "Time optimization: 21:00 route second"
+        },
+        {
+          "name": "WUXI [26/00017]",
+          "end_time": "21:00",
+          "workers": 1,
+          "special_rules": "Time optimization: 21:00 route second"
+        }
+      ],
+      "total_workers": 13,
+      "utilization_status": "WARNING: High Capacity (93%)"
+    },
+    {
+      "driver_details": {
+        "driver_number": "Driver 10",
+        "vehicle_code": "14ft",
+        "capacity": 25,
+        "region": "Backup (Central)"
+      },
+      "assigned_sites": [
+        {
+          "name": "Micron - L and K [26/00077]",
+          "end_time": "22:00",
+          "workers": 13,
+          "special_rules": "Dinner driver handled by primary pickup driver"
+        },
+        {
+          "name": "Woh Hup [25/00070]",
+          "end_time": "22:00",
+          "workers": 8,
+          "special_rules": "Dinner driver handled by primary pickup driver"
+        }
+      ],
+      "total_workers": 21,
+      "utilization_status": "OK"
+    }
+  ],
+  "unassigned_drivers": [
+    {
+      "driver_number": "Driver 7",
+      "status": "Standby/Backup",
+      "region": "East (Changi)"
+    },
+    {
+      "driver_number": "Driver 8",
+      "status": "Standby/Backup",
+      "region": "East (Tampines)"
+    },
+    {
+      "driver_number": "Driver 9",
+      "status": "Standby/Backup",
+      "region": "Backup (East)"
+    }
+  ]
 }
