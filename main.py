@@ -3,8 +3,8 @@ import streamlit as st
 import google.generativeai as genai
 
 # Page Configuration
-st.set_page_config(page_title="Daily Lorry Dispatch Generator", page_icon="🚚", layout="wide")
-st.title("🚚 Daily Lorry Dispatch Generator")
+st.set_page_config(page_title="Dynamic Lorry Dispatch Generator", page_icon="🚚", layout="wide")
+st.title("🚚 Dynamic Lorry Dispatch Generator")
 
 # Sidebar for Gemini API Key input
 st.sidebar.header("Configuration")
@@ -14,14 +14,13 @@ SPREADSHEET_ID = "1AJXN_aUILuokaJhPLCTVb7IIwLnzc3gKpPCmfrJLOdY"
 
 def get_raw_sheet_data(worksheet):
     """
-    Extracts the raw 2D array of the sheet. We need this for 'Daily_Ops' because 
-    it has a complex layout (headers at the top, shifting workers at the bottom).
+    Extracts raw 2D array for Daily Ops to capture dynamic daily changes.
     """
     return worksheet.get_all_values()
 
 def get_clean_records(worksheet):
     """
-    Safely parses standard database worksheets (like Site_Database) into dictionaries.
+    Parses standard databases (Sites, Drivers) into clean, dynamic dictionaries.
     """
     all_values = worksheet.get_all_values()
     if not all_values or len(all_values) < 2:
@@ -55,7 +54,7 @@ def get_clean_records(worksheet):
 
 def load_google_sheet_data():
     """
-    Loads Daily Ops, Site Database, and Fleet Drivers.
+    Loads dynamic data directly from Google Sheets.
     """
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -90,7 +89,7 @@ def load_google_sheet_data():
 
 def run_dispatcher(api_key, shift_type):
     """
-    Generates dispatch schedule enforcing STRICT MATH BALANCING, REAL DRIVER NAMES, and MANDATORY DINNER.
+    Generates a dynamic dispatch schedule based on real-time spreadsheet variables, Lat/Lng math, and universal rules.
     """
     genai.configure(api_key=api_key)
     daily_ops_data, sites, drivers = load_google_sheet_data()
@@ -100,38 +99,29 @@ def run_dispatcher(api_key, shift_type):
         if any(str(cell).strip() for cell in row):
             daily_ops_text += " | ".join([str(cell).strip() for cell in row]) + "\n"
 
-    # THE FIX: Added "STEP 3: STRICT WORKLOAD DISTRIBUTION PLAN" to force the AI to mathematically divide jobs.
+    # THE FIX: This prompt is completely dynamic. It relies entirely on what is in the sheets today, 
+    # enforces the 50km/h rule via Lat/Lng, and forces dynamic balancing.
     prompt = (
-        f"You are the Master Dispatcher. You MUST process the schedule in exact order. DO NOT skip steps.\n\n"
-        f"--- TODAY'S WORKLOAD (DAILY OPS) ---\n{daily_ops_text}\n\n"
-        f"--- SITE REGIONS & COORDS ---\n{sites}\n\n"
-        f"--- FLEET DRIVERS ---\n{drivers}\n\n"
-        f"YOU MUST OUTPUT YOUR RESPONSE EXACTLY IN THESE 4 STEPS:\n\n"
+        f"You are an advanced Logistics Dispatcher AI. Process the daily schedule dynamically based strictly on the data provided below.\n\n"
+        f"--- TODAY'S DYNAMIC WORKLOAD (DAILY OPS) ---\n{daily_ops_text}\n\n"
+        f"--- SITE DATABASE (LATITUDE & LONGITUDE) ---\n{sites}\n\n"
+        f"--- ACTIVE FLEET DRIVERS ---\n{drivers}\n\n"
+        f"CRITICAL UNIVERSAL RULES (APPLY TO ANY DATA SET):\n"
+        f"1. DYNAMIC DRIVER NAMES: Extract driver names directly from the 'Active Fleet Drivers' list provided above. NEVER use placeholders like 'Driver 1'.\n"
+        f"2. LAT/LNG TRAVEL MATH: Cross-reference the sites in Daily Ops with their Latitude and Longitude in the Site Database. You MUST calculate route feasibility based on a heavy lorry speed limit of 50 km/h, adding a mandatory 15-minute traffic/wait buffer between sites. Do not assign impossible routes.\n"
+        f"3. DYNAMIC DINNER OVERRIDE: Identify ANY site ending at 22:00 (10 PM) in today's data. You MUST explicitly assign a specific, named driver to deliver food to these sites BEFORE 22:00.\n"
+        f"4. DYNAMIC BALANCING: Count the total number of sites for this shift. Divide them equally among the available main drivers listed in the data. No driver should have 4 jobs while another has 1.\n\n"
         
-        f"### STEP 1: REAL DRIVER NAMES & MANDATORY DINNER ASSIGNMENT\n"
-        f"CRITICAL RULE FOR NAMES: You MUST assign jobs using ONLY these exact names. NEVER use 'Driver 1' etc:\n"
-        f"- MAIN 5 DRIVERS: Sridhar, Kalingarathnam, Mahendran, K. Pandi, Senthil\n"
-        f"- STAFF DRIVER: Saravanan\n"
-        f"DINNER OVERRIDE RULE: Identify EVERY site that ends at 22:00 (10 PM). YOU ABSOLUTELY MUST ASSIGN ONE DRIVER TO DELIVER FOOD TO THESE SITES BEFORE 22:00. Note: A driver doing a 19:00 or 21:00 pickup is STILL ALLOWED to drop off food beforehand. You MUST explicitly write their real name in the table.\n"
-        f"Print this as a Markdown table with columns: '10 PM Site Name', 'Dinner Driver Assigned (REAL NAME)', 'Vehicle'.\n\n"
+        f"YOU MUST OUTPUT YOUR RESPONSE EXACTLY IN THESE 3 SECTIONS:\n\n"
         
-        f"### STEP 2: GEOGRAPHIC MAPPING (NO TELEPORTING)\n"
-        f"List every 19:00 and 21:00 site. Next to it, state its exact Region (e.g., Tuas, Woodlands, Jurong). "
-        f"If two sites at the same time are in DIFFERENT regions, declare them 'GEOGRAPHICALLY INCOMPATIBLE'.\n\n"
+        f"### 🍽️ DYNAMIC DINNER ASSIGNMENTS\n"
+        f"Print a Markdown table for any 22:00 sites identified today. Columns: 'Site Name', 'Assigned Driver (Real Name)', 'Vehicle'.\n\n"
         
-        f"### STEP 3: STRICT WORKLOAD DISTRIBUTION PLAN\n"
-        f"CRITICAL RULE: The schedule MUST be perfectly fair. It is UNACCEPTABLE for one driver to do only one job while another does three.\n"
-        f"Write out your assignment plan explicitly before drawing the final table:\n"
-        f"1. Count the total number of 19:00 (7 PM) sites. Divide them evenly among the 5 Main Drivers. EVERY main driver MUST get at least one 19:00 job if possible before anyone gets two.\n"
-        f"2. Count the total number of 21:00 (9 PM) and 22:00 (10 PM) sites. Divide them evenly among the 5 Main Drivers. EVERY main driver MUST get a late job. No driver is allowed to go home early if others are working late.\n"
-        f"Write out a short summary of who gets how many jobs here.\n\n"
-
-        f"### STEP 4: FINAL DISPATCH SCHEDULE\n"
-        f"Now, build the final schedule based EXACTLY on the fair distribution from Step 3. \n"
-        f"- USE REAL NAMES ONLY.\n"
-        f"- Do NOT group geographically incompatible sites from Step 2.\n"
-        f"- Respect Lorry Capacity limits.\n"
-        f"Print the final schedule in a Markdown table with columns: Driver Name, Vehicle, Assigned Sites (with times), Total Workers."
+        f"### 🗺️ ROUTING & TRAVEL TIME CALCULATION\n"
+        f"Briefly explain your routing logic for the busiest drivers, proving that travel times between their assigned sites are physically possible at 50 km/h with a 15-minute buffer using their Lat/Lng coordinates.\n\n"
+        
+        f"### 🚚 FINAL DISPATCH SCHEDULE\n"
+        f"Print the balanced schedule in a Markdown table with columns: 'Driver Name', 'Vehicle', 'Assigned Sites (with times)', 'Total Workers'. Respect dynamic vehicle capacities."
     )
 
     candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
@@ -152,10 +142,10 @@ def run_dispatcher(api_key, shift_type):
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
-            # Temperature 0.0 forces the AI to follow the Math logic strictly
+            # Temperature 0.1 locks the AI into strict analytical mode for mapping and math
             response = model.generate_content(
                 prompt,
-                generation_config=genai.types.GenerationConfig(temperature=0.0) 
+                generation_config=genai.types.GenerationConfig(temperature=0.1) 
             )
             return response.text
         except Exception as e:
@@ -168,9 +158,9 @@ def run_dispatcher(api_key, shift_type):
 shift_type = st.selectbox(
     "Select Shift Type",
     [
-        "EVENING_2100_2200",
         "MORNING_0700_1500",
         "AFTERNOON_1500_2300",
+        "EVENING_2100_2200",
         "NIGHT_2300_0700",
     ],
     key="shift_type_select"
@@ -180,7 +170,7 @@ if st.button("Generate Dispatch Schedule", key="generate_schedule_btn"):
     if not api_key_input:
         st.error("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Analyzing Daily Ops, forcing strict math for fair workload, and assigning drivers..."):
+        with st.spinner("Analyzing today's dynamic data, calculating 50km/h routing with buffers, and balancing workload..."):
             try:
                 schedule = run_dispatcher(api_key_input, shift_type)
                 st.success("Schedule generated successfully!")
