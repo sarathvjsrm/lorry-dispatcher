@@ -1,4 +1,5 @@
 import json
+import time
 import gspread
 import streamlit as st
 import google.generativeai as genai
@@ -16,35 +17,44 @@ SPREADSHEET_ID = config["spreadsheet_id"]
 st.sidebar.header("System Configuration")
 api_key_input = st.sidebar.text_input("Gemini API Key", type="password")
 
-# --- DATA EXTRACTION ENGINE WITH CACHING (Prevents 429 Quota Errors) ---
-@st.cache_data(ttl=60)
-def load_google_sheet_data():
+# --- ROBUST DATA EXTRACTION WITH EXPONENTIAL BACKOFF & CACHING ---
+@st.cache_data(ttl=300, show_spinner=False)
+jdef load_google_sheet_data():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
     
-    # Authenticate using Streamlit secrets
     creds_dict = dict(st.secrets["gcp_service_account"])
     if "private_key" in creds_dict:
         creds_dict["private_key"] = str(creds_dict["private_key"]).replace("\\n", "\n")
         
     client = gspread.service_account_from_dict(creds_dict, scopes=scopes)
-    sheet = client.open_by_key(SPREADSHEET_ID)
-
-    # Safely fetch dynamic worksheets
-    daily_ops_ws = sheet.worksheet("Daily_Ops")
-    site_ws = sheet.worksheet("Site_Database")
-    driver_ws = sheet.worksheet("Fleet_Drivers")
-
-    # Get raw grids
-    daily_ops_data = daily_ops_ws.get_all_values()
     
-    # Parse Sites and Drivers into dynamic lists of dictionaries
-    sites = [dict(zip(site_ws.get_all_values()[0], row)) for row in site_ws.get_all_values()[1:] if any(row)]
-    drivers = [dict(zip(driver_ws.get_all_values()[0], row)) for row in driver_ws.get_all_values()[1:] if any(row)]
+    # Implement retry backoff to handle Google Sheets 429 Rate Limits gracefully
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            sheet = client.open_by_key(SPREADSHEET_ID)
+            
+            # Fetch all worksheet values in a structured sequence with minimal overhead
+            daily_ops_ws = sheet.worksheet("Daily_Ops")
+            site_ws = sheet.worksheet("Site_Database")
+            driver_ws = sheet.worksheet("Fleet_Drivers")
 
-    return daily_ops_data, sites, drivers
+            daily_ops_data = daily_ops_ws.get_all_values()
+            site_data = site_ws.get_all_values()
+            driver_data = driver_ws.get_all_values()
+
+            sites = [dict(zip(site_data[0], row)) for row in site_data[1:] if any(row)]
+            drivers = [dict(zip(driver_data[0], row)) for row in driver_data[1:] if any(row)]
+
+            return daily_ops_data, sites, drivers
+        except Exception as e:
+            if "429" in str(e) and attempt < max_retries - 1:
+                time.sleep(2 * (attempt + 1)) # Wait longer before retrying
+                continue
+            raise e
 
 # --- AI DISPATCH ENGINE ---
 def generate_dynamic_schedule(api_key, shift_type):
@@ -105,4 +115,4 @@ if st.button("Generate Dynamic Schedule"):
                 st.success("Schedule Generated Successfully!")
                 st.markdown(schedule_output)
             except Exception as e:
-                st.error(f"System Error: {e}")
+                st.error(f"System Error: {e}. (Tip: If quota error persists, wait 60 seconds for Google Sheet rate limits to reset.)")
