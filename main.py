@@ -4,7 +4,6 @@ import google.generativeai as genai
 
 # Page Configuration
 st.set_page_config(page_title="Daily Lorry Dispatch Generator", page_icon="🚚", layout="wide")
-
 st.title("🚚 Daily Lorry Dispatch Generator")
 
 # Sidebar for Gemini API Key input
@@ -13,10 +12,16 @@ api_key_input = st.sidebar.text_input("Gemini API Key", type="password", key="ge
 
 SPREADSHEET_ID = "1AJXN_aUILuokaJhPLCTVb7IIwLnzc3gKpPCmfrJLOdY"
 
+def get_raw_sheet_data(worksheet):
+    """
+    Extracts the raw 2D array of the sheet. We need this for 'Daily_Ops' because 
+    it has a complex layout (headers at the top, shifting workers at the bottom).
+    """
+    return worksheet.get_all_values()
 
 def get_clean_records(worksheet):
     """
-    Safely parses worksheet rows into dictionaries, avoiding errors with empty or duplicate header cells.
+    Safely parses standard database worksheets (like Site_Database) into dictionaries.
     """
     all_values = worksheet.get_all_values()
     if not all_values or len(all_values) < 2:
@@ -30,13 +35,11 @@ def get_clean_records(worksheet):
         h_text = str(header).strip()
         if not h_text:
             h_text = f"Column_{idx + 1}"
-        
         if h_text in seen_counts:
             seen_counts[h_text] += 1
             h_text = f"{h_text}_{seen_counts[h_text]}"
         else:
             seen_counts[h_text] = 0
-            
         clean_headers.append(h_text)
 
     records = []
@@ -48,13 +51,11 @@ def get_clean_records(worksheet):
             if idx < len(clean_headers):
                 row_dict[clean_headers[idx]] = cell_val
         records.append(row_dict)
-
     return records
-
 
 def load_google_sheet_data():
     """
-    Loads site database and fleet drivers directly by Spreadsheet ID with fallback handling.
+    Loads Daily Ops, Site Database, and Fleet Drivers.
     """
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -67,9 +68,7 @@ def load_google_sheet_data():
         
     client = gspread.service_account_from_dict(creds_dict, scopes=scopes)
     sheet = client.open_by_key(SPREADSHEET_ID)
-
     worksheets = sheet.worksheets()
-    sheet_names = [ws.title for ws in worksheets]
 
     def get_worksheet_by_name(preferred_name, fallback_index):
         for ws in worksheets:
@@ -77,46 +76,62 @@ def load_google_sheet_data():
                 return ws
         if len(worksheets) > fallback_index:
             return worksheets[fallback_index]
-        raise ValueError(f"Could not find worksheet '{preferred_name}'. Available tabs: {sheet_names}")
+        return None
 
-    site_ws = get_worksheet_by_name("Site Database", 0)
-    driver_ws = get_worksheet_by_name("Fleet_Drivers", 1)
+    # Fetch exactly the tabs you mentioned
+    daily_ops_ws = get_worksheet_by_name("Daily_Ops", 0)
+    site_ws = get_worksheet_by_name("Site_Database", 1)
+    driver_ws = get_worksheet_by_name("Fleet_Drivers", 2)
 
-    sites = get_clean_records(site_ws)
-    drivers = get_clean_records(driver_ws)
+    # Use raw 2D array for Daily Ops so the LLM can read the MOE transfer section at the bottom
+    daily_ops_data = get_raw_sheet_data(daily_ops_ws) if daily_ops_ws else []
+    
+    # Use clean dictionaries for databases
+    sites = get_clean_records(site_ws) if site_ws else []
+    drivers = get_clean_records(driver_ws) if driver_ws else []
 
-    return sites, drivers
-
+    return daily_ops_data, sites, drivers
 
 def run_dispatcher(api_key, shift_type):
     """
-    Generates dispatch schedule using Gemini API with automatic model fallback loop.
+    Generates dispatch schedule using Gemini API with strict geographic and capacity rules.
     """
     genai.configure(api_key=api_key)
-    sites, drivers = load_google_sheet_data()
+    daily_ops_data, sites, drivers = load_google_sheet_data()
+
+    # Convert the raw Daily Ops grid into a readable string for the AI
+    daily_ops_text = ""
+    for row in daily_ops_data:
+        # Ignore completely empty rows to save tokens
+        if any(str(cell).strip() for cell in row):
+            daily_ops_text += " | ".join([str(cell).strip() for cell in row]) + "\n"
 
     prompt = (
-        f"You are an expert logistics and lorry dispatch planner.\n"
-        f"Generate an optimized lorry dispatch schedule for the '{shift_type}' shift.\n\n"
-        f"--- SITE DATABASE ---\n{sites}\n\n"
+        f"You are the Master Dispatcher for a Singapore logistics fleet.\n"
+        f"Generate an optimized lorry dispatch schedule for the '{shift_type}' shift based EXACTLY on the jobs filled out in the 'Daily Ops' data below.\n\n"
+        f"--- TODAY'S WORKLOAD (DAILY OPS) ---\n"
+        f"NOTE: Read this carefully. The top section contains regular shift end times. The bottom section (around row 24/25) contains 'SHIFTING WORKERS / Site-to-Site Transfers'. You must schedule BOTH.\n\n"
+        f"{daily_ops_text}\n\n"
+        f"--- SITE DATABASE (FOR LAT/LNG AND REGIONS) ---\n{sites}\n\n"
         f"--- FLEET DRIVERS ---\n{drivers}\n\n"
-        f"Please organize the output clearly with formatted tables and summary instructions."
+        f"CRITICAL DISPATCH RULES:\n"
+        f"1. GEOGRAPHIC REALITY (NO TELEPORTING): You MUST cross-reference the Daily Ops sites with the Site Database to estimate distance (using Latitude/Longitude or Region). A driver CANNOT pick up from two distant sites at the exact same time (e.g., Jurong and Woodlands at 21:00). If sites are distant, ASSIGN DIFFERENT DRIVERS.\n"
+        f"2. PRIORITIZE 5 MAIN DRIVERS: You MUST fill the 5 main OT drivers' schedules first. Maximize their routes (up to 25 pax for 14ft, 14 pax for 10ft) without causing time conflicts. Do not waste extra lorries.\n"
+        f"3. STAFF DRIVER BACKUP: ONLY utilize the Staff Driver if the main 5 drivers are completely full or if a route is geographically impossible for the main drivers to cover simultaneously.\n"
+        f"4. DINNER DRIVER (FOOD): For any sites ending at 22:00 (10 PM), you MUST assign a driver to bring food to that site beforehand. Clearly indicate this 'Dinner Delivery' duty in your output.\n\n"
+        f"Output the final schedule in a clear markdown table including: Driver Name, Vehicle, Assigned Sites, Pickup Times, Total Workers, and Dinner Duty.\n"
+        f"Below the table, provide a 'Routing Logic Check' showing the estimated travel time between clustered sites to prove the route is physically possible in Singapore."
     )
 
-    # Candidate models to try in order of performance and availability
-    candidate_models = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro"
-    ]
-
+    candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    
     try:
-        listed = [
+        available_models = [
             m.name.replace("models/", "")
             for m in genai.list_models()
             if "generateContent" in m.supported_generation_methods
         ]
-        for item in listed:
+        for item in available_models:
             if item not in candidate_models and "2.5" not in item:
                 candidate_models.append(item)
     except Exception:
@@ -126,14 +141,17 @@ def run_dispatcher(api_key, shift_type):
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            # Setting temperature to 0.1 makes the AI strictly logical and stops hallucinations
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(temperature=0.1)
+            )
             return response.text
         except Exception as e:
             last_exception = e
             continue
 
     raise last_exception
-
 
 # Main UI Elements
 shift_type = st.selectbox(
@@ -151,7 +169,7 @@ if st.button("Generate Dispatch Schedule", key="generate_schedule_btn"):
     if not api_key_input:
         st.error("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Fetching data from Google Sheets & generating schedule..."):
+        with st.spinner("Analyzing Daily Ops, Map Coordinates, and generating schedule..."):
             try:
                 schedule = run_dispatcher(api_key_input, shift_type)
                 st.success("Schedule generated successfully!")
