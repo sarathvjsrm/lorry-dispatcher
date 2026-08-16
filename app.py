@@ -61,39 +61,42 @@ def generate_dynamic_schedule(api_key, shift_type):
 
     daily_ops_text = "\n".join([" | ".join([str(cell).strip() for cell in row]) for row in daily_ops_data if any(row)])
 
-    # Define your main 5 drivers based on your database screenshot
-    primary_driver_names = ["Mahendran", "Sridhar", "Kailing", "Senthil", "Pandi"]
-    
-    all_driver_names = []
+    # Parse and build clear capacity map for each driver
+    driver_specs = []
     for d in drivers:
-        name = d.get("Driver Name", d.get("Name", d.get("Driver", str(list(d.values())[0]))))
-        if name and name.strip():
-            all_driver_names.append(name.strip())
+        name = d.get("Driver No.", d.get("Driver Name", d.get("Name", ""))).strip()
+        cap_str = d.get("Max Capacity", "25")
+        try:
+            cap = int(cap_str)
+        except:
+            cap = 25
+        if name:
+            driver_specs.append(f"- Driver: {name} | Vehicle: {d.get('Vehicle Code')} | Type: {d.get('Type')} | Max Legal Capacity: {cap} pax")
 
+    drivers_summary_text = "\n".join(driver_specs)
+
+    primary_driver_names = ["Mahendran", "Sridhar", "Kailing", "Senthil", "Pandi"]
     primary_string = ", ".join(primary_driver_names)
-    all_string = ", ".join(all_driver_names)
 
     prompt = (
         f"You are a master Logistics AI. You are generating a schedule for the '{shift_type}' shift.\n\n"
         f"--- TODAY'S DYNAMIC WORKLOAD ---\n{daily_ops_text}\n\n"
-        f"--- SITE DATABASE (COORDINATES) ---\n{sites}\n\n"
-        f"--- FLEET DRIVERS DATABASE ---\n{drivers}\n\n"
+        f"--- SITE DATABASE (COORDINATES & DETAILS) ---\n{sites}\n\n"
+        f"--- FLEET DRIVERS & STRICT LEGAL CAPACITIES ---\n{drivers_summary_text}\n\n"
         
-        f"CRITICAL SYSTEM RULES (MUST OBEY):\n"
-        f"1. DRIVER PRIORITY TIER:\n"
-        f"   - PRIMARY TIER (Use these 5 first): {primary_string}.\n"
-        f"   - BACKUP / STAFF TIER (Use these additional drivers ONLY if the workload is too heavy or difficult to cover with the primary 5): {all_string}.\n"
-        f"2. WORKLOAD BALANCING & OVERFLOW: Assign sites primarily to the 5 main drivers. If there are too many sites for 5 drivers to handle efficiently, overflow the remaining sites to the additional staff drivers from the database.\n"
-        f"3. DYNAMIC DINNER DELIVERY: Identify ANY site in Today's Workload ending at 22:00. You MUST assign a specific driver to deliver food to them before pickup.\n"
-        f"4. TRAVEL REALITY: Use the Latitude/Longitude from the Site Database. Do not assign sites that are geographically impossible to reach sequentially.\n\n"
+        f"CRITICAL SAFETY & SYSTEM RULES (MUST OBEY OR IT IS AN ILLEGAL DISPATCH):\n"
+        f"1. STRICT MAXIMUM CAPACITY LAW: You are legally FORBIDDEN from assigning a total worker count to any driver that exceeds their 'Max Legal Capacity' specified in the fleet database above (e.g., Senthil's max capacity is 14 pax, do NOT overload him past 14 under any circumstance!).\n"
+        f"2. DRIVER PRIORITY & OVERFLOW: Use the primary 5 drivers first ({primary_string}). If a site's worker count or total workload exceeds a driver's legal capacity or geographic reach, split the loads properly or overflow to additional staff drivers from the database.\n"
+        f"3. GEOGRAPHIC & TIMING REALITY: Use the Latitude/Longitude from the Site Database. Sequential site pickups must be physically reachable within the given time windows. Do not schedule impossible sequential hops.\n"
+        f"4. DYNAMIC DINNER DELIVERY: Identify ANY site ending at 22:00. Assign a driver to deliver food before pickup.\n\n"
         
         f"OUTPUT FORMAT (Provide exactly these 3 sections in Markdown):\n\n"
         f"### 🍽️ DINNER DELIVERY ASSIGNMENTS\n"
         f"(Table: Site Name | Dinner Driver (Real Name) | Vehicle)\n\n"
-        f"### ⚖️ WORKLOAD BALANCING & TIER AUDIT\n"
-        f"(Briefly explain which primary drivers were used, and state whether additional staff drivers were needed for overflow.)\n\n"
+        f"### ⚖️ LEGAL CAPACITY & WORKLOAD AUDIT\n"
+        f"(List each driver used, their Max Legal Capacity, their Assigned Total Workers, and explicitly verify that NO driver exceeded their legal limit.)\n\n"
         f"### 🚚 DYNAMIC DISPATCH SCHEDULE\n"
-        f"(Table: Driver Name (Real Name) | Vehicle | Assigned Sites & Times | Total Workers)\n"
+        f"(Table: Driver Name | Vehicle | Assigned Sites & Times | Total Workers | Capacity Check Status)\n"
     )
 
     model = genai.GenerativeModel("gemini-3.5-flash")
@@ -110,7 +113,7 @@ if st.button("Generate Dynamic Schedule"):
     if not api_key_input:
         st.error("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Prioritizing main 5 drivers, evaluating workload overflow, and routing..."):
+        with st.spinner("Checking legal capacities against database limits, verifying coordinates, and routing..."):
             try:
                 schedule_output = generate_dynamic_schedule(api_key_input, shift_selection)
                 st.success("Schedule Generated Successfully!")
