@@ -78,15 +78,11 @@ def load_google_sheet_data():
             return worksheets[fallback_index]
         return None
 
-    # Fetch exactly the tabs you mentioned
     daily_ops_ws = get_worksheet_by_name("Daily_Ops", 0)
     site_ws = get_worksheet_by_name("Site_Database", 1)
     driver_ws = get_worksheet_by_name("Fleet_Drivers", 2)
 
-    # Use raw 2D array for Daily Ops so the LLM can read the MOE transfer section at the bottom
     daily_ops_data = get_raw_sheet_data(daily_ops_ws) if daily_ops_ws else []
-    
-    # Use clean dictionaries for databases
     sites = get_clean_records(site_ws) if site_ws else []
     drivers = get_clean_records(driver_ws) if driver_ws else []
 
@@ -94,36 +90,45 @@ def load_google_sheet_data():
 
 def run_dispatcher(api_key, shift_type):
     """
-    Generates dispatch schedule enforcing EQUAL WORKLOAD, REAL DRIVER NAMES, and STRICT GEOGRAPHY.
+    Generates dispatch schedule enforcing STRICT MATH BALANCING, REAL DRIVER NAMES, and MANDATORY DINNER.
     """
     genai.configure(api_key=api_key)
     daily_ops_data, sites, drivers = load_google_sheet_data()
 
-    # Convert the raw Daily Ops grid into a readable string for the AI
     daily_ops_text = ""
     for row in daily_ops_data:
         if any(str(cell).strip() for cell in row):
             daily_ops_text += " | ".join([str(cell).strip() for cell in row]) + "\n"
 
+    # THE FIX: Added "STEP 3: STRICT WORKLOAD DISTRIBUTION PLAN" to force the AI to mathematically divide jobs.
     prompt = (
         f"You are the Master Dispatcher. You MUST process the schedule in exact order. DO NOT skip steps.\n\n"
         f"--- TODAY'S WORKLOAD (DAILY OPS) ---\n{daily_ops_text}\n\n"
         f"--- SITE REGIONS & COORDS ---\n{sites}\n\n"
         f"--- FLEET DRIVERS ---\n{drivers}\n\n"
-        f"YOU MUST OUTPUT YOUR RESPONSE EXACTLY IN THESE 3 STEPS:\n\n"
+        f"YOU MUST OUTPUT YOUR RESPONSE EXACTLY IN THESE 4 STEPS:\n\n"
         
-        f"### STEP 1: REAL DRIVER NAMES & DINNER ASSIGNMENT\n"
-        f"CRITICAL RULE: NEVER use generic names like 'Driver 1' or 'Driver 2'. You MUST use the actual names of the main 5 drivers (e.g., Sridhar, Kalingarathnam, Mahendran, K. Pandi, Senthil) and the 'Staff Driver' (Saravanan) as listed in the Fleet Drivers data.\n"
-        f"First, identify EVERY site that ends at 22:00 (10 PM). Assign one available driver using their REAL NAME to be the 'Dinner Driver' to deliver food BEFORE 22:00. Print this as a Markdown table.\n\n"
+        f"### STEP 1: REAL DRIVER NAMES & MANDATORY DINNER ASSIGNMENT\n"
+        f"CRITICAL RULE FOR NAMES: You MUST assign jobs using ONLY these exact names. NEVER use 'Driver 1' etc:\n"
+        f"- MAIN 5 DRIVERS: Sridhar, Kalingarathnam, Mahendran, K. Pandi, Senthil\n"
+        f"- STAFF DRIVER: Saravanan\n"
+        f"DINNER OVERRIDE RULE: Identify EVERY site that ends at 22:00 (10 PM). YOU ABSOLUTELY MUST ASSIGN ONE DRIVER TO DELIVER FOOD TO THESE SITES BEFORE 22:00. Note: A driver doing a 19:00 or 21:00 pickup is STILL ALLOWED to drop off food beforehand. You MUST explicitly write their real name in the table.\n"
+        f"Print this as a Markdown table with columns: '10 PM Site Name', 'Dinner Driver Assigned (REAL NAME)', 'Vehicle'.\n\n"
         
         f"### STEP 2: GEOGRAPHIC MAPPING (NO TELEPORTING)\n"
         f"List every 19:00 and 21:00 site. Next to it, state its exact Region (e.g., Tuas, Woodlands, Jurong). "
-        f"If two sites at the same time are in DIFFERENT regions, declare them 'GEOGRAPHICALLY INCOMPATIBLE' so they are not put on the same lorry.\n\n"
+        f"If two sites at the same time are in DIFFERENT regions, declare them 'GEOGRAPHICALLY INCOMPATIBLE'.\n\n"
         
-        f"### STEP 3: FINAL DISPATCH SCHEDULE (EQUAL BALANCING)\n"
-        f"Now, build the final schedule. \n"
-        f"- EQUAL WORKLOAD: You MUST distribute the jobs evenly across the 5 Main Drivers. Do NOT cram all jobs onto one driver just because they have vehicle capacity. Ensure every driver gets a fair share of the 19:00 and 21:00/22:00 runs so no one is resting while another is overloaded.\n"
-        f"- Use their REAL NAMES.\n"
+        f"### STEP 3: STRICT WORKLOAD DISTRIBUTION PLAN\n"
+        f"CRITICAL RULE: The schedule MUST be perfectly fair. It is UNACCEPTABLE for one driver to do only one job while another does three.\n"
+        f"Write out your assignment plan explicitly before drawing the final table:\n"
+        f"1. Count the total number of 19:00 (7 PM) sites. Divide them evenly among the 5 Main Drivers. EVERY main driver MUST get at least one 19:00 job if possible before anyone gets two.\n"
+        f"2. Count the total number of 21:00 (9 PM) and 22:00 (10 PM) sites. Divide them evenly among the 5 Main Drivers. EVERY main driver MUST get a late job. No driver is allowed to go home early if others are working late.\n"
+        f"Write out a short summary of who gets how many jobs here.\n\n"
+
+        f"### STEP 4: FINAL DISPATCH SCHEDULE\n"
+        f"Now, build the final schedule based EXACTLY on the fair distribution from Step 3. \n"
+        f"- USE REAL NAMES ONLY.\n"
         f"- Do NOT group geographically incompatible sites from Step 2.\n"
         f"- Respect Lorry Capacity limits.\n"
         f"Print the final schedule in a Markdown table with columns: Driver Name, Vehicle, Assigned Sites (with times), Total Workers."
@@ -147,7 +152,7 @@ def run_dispatcher(api_key, shift_type):
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
-            # Temperature 0.0 forces the AI to be completely logical and fair based on instructions
+            # Temperature 0.0 forces the AI to follow the Math logic strictly
             response = model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(temperature=0.0) 
@@ -175,7 +180,7 @@ if st.button("Generate Dispatch Schedule", key="generate_schedule_btn"):
     if not api_key_input:
         st.error("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Analyzing Daily Ops, Map Coordinates, and balancing driver workload..."):
+        with st.spinner("Analyzing Daily Ops, forcing strict math for fair workload, and assigning drivers..."):
             try:
                 schedule = run_dispatcher(api_key_input, shift_type)
                 st.success("Schedule generated successfully!")
