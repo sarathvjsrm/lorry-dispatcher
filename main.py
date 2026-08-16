@@ -94,7 +94,7 @@ def load_google_sheet_data():
 
 def run_dispatcher(api_key, shift_type):
     """
-    Generates dispatch schedule using Gemini API with strict geographic, capacity, and mandatory dinner rules.
+    Generates dispatch schedule enforcing EQUAL WORKLOAD, REAL DRIVER NAMES, and STRICT GEOGRAPHY.
     """
     genai.configure(api_key=api_key)
     daily_ops_data, sites, drivers = load_google_sheet_data()
@@ -106,29 +106,27 @@ def run_dispatcher(api_key, shift_type):
             daily_ops_text += " | ".join([str(cell).strip() for cell in row]) + "\n"
 
     prompt = (
-        f"You are the Master Dispatcher for a Singapore logistics fleet.\n"
-        f"Generate an optimized lorry dispatch schedule for the '{shift_type}' shift based EXACTLY on the 'Daily Ops' data below.\n\n"
-        f"--- TODAY'S WORKLOAD (DAILY OPS) ---\n"
-        f"NOTE: Read this carefully. The top section contains regular shift end times. The bottom section (around row 24/25) contains 'SHIFTING WORKERS / Site-to-Site Transfers'. You must schedule BOTH.\n\n"
-        f"{daily_ops_text}\n\n"
-        f"--- SITE DATABASE (FOR LAT/LNG AND REGIONS) ---\n{sites}\n\n"
+        f"You are the Master Dispatcher. You MUST process the schedule in exact order. DO NOT skip steps.\n\n"
+        f"--- TODAY'S WORKLOAD (DAILY OPS) ---\n{daily_ops_text}\n\n"
+        f"--- SITE REGIONS & COORDS ---\n{sites}\n\n"
         f"--- FLEET DRIVERS ---\n{drivers}\n\n"
-        f"CRITICAL DISPATCH RULES:\n"
-        f"1. GEOGRAPHIC REALITY: Use Lat/Lng and Regions to estimate distance. A driver CANNOT pick up from distant sites at the exact same time (e.g., West vs North). Assign DIFFERENT DRIVERS to distant sites.\n"
-        f"2. PRIORITIZE 5 MAIN DRIVERS: Fill their schedules first (up to 25 pax for 14ft, 14 pax for 10ft). Do not waste extra lorries.\n"
-        f"3. STAFF DRIVER BACKUP: ONLY utilize Staff Driver if the main 5 are completely full or geographically impossible.\n"
-        f"4. MANDATORY DINNER DELIVERY (10 PM SITES): You MUST identify every site ending at 22:00 (10 PM). You MUST explicitly assign a driver to deliver dinner to these sites before the pickup.\n\n"
-        f"YOU MUST USE THIS EXACT OUTPUT FORMAT:\n\n"
-        f"### 🍽️ DINNER DELIVERY ASSIGNMENTS (Strictly for 22:00 Sites)\n"
-        f"| 10 PM Site Name | Dinner Driver Assigned | Vehicle |\n"
-        f"|---|---|---|\n"
-        f"(List every 22:00 site and the driver assigned to bring them food)\n\n"
-        f"### 🚚 MAIN PICKUP DISPATCH SCHEDULE\n"
-        f"| Driver Name | Vehicle | Assigned Sites | Pickup Times | Total Workers |\n"
-        f"|---|---|---|---|---|\n"
-        f"(List all pickups here)\n\n"
-        f"### 🗺️ ROUTING LOGIC CHECK\n"
-        f"(Prove travel times between clustered sites are geographically possible in Singapore)"
+        f"YOU MUST OUTPUT YOUR RESPONSE EXACTLY IN THESE 3 STEPS:\n\n"
+        
+        f"### STEP 1: REAL DRIVER NAMES & DINNER ASSIGNMENT\n"
+        f"CRITICAL RULE: NEVER use generic names like 'Driver 1' or 'Driver 2'. You MUST use the actual names of the main 5 drivers (e.g., Sridhar, Kalingarathnam, Mahendran, K. Pandi, Senthil) and the 'Staff Driver' (Saravanan) as listed in the Fleet Drivers data.\n"
+        f"First, identify EVERY site that ends at 22:00 (10 PM). Assign one available driver using their REAL NAME to be the 'Dinner Driver' to deliver food BEFORE 22:00. Print this as a Markdown table.\n\n"
+        
+        f"### STEP 2: GEOGRAPHIC MAPPING (NO TELEPORTING)\n"
+        f"List every 19:00 and 21:00 site. Next to it, state its exact Region (e.g., Tuas, Woodlands, Jurong). "
+        f"If two sites at the same time are in DIFFERENT regions, declare them 'GEOGRAPHICALLY INCOMPATIBLE' so they are not put on the same lorry.\n\n"
+        
+        f"### STEP 3: FINAL DISPATCH SCHEDULE (EQUAL BALANCING)\n"
+        f"Now, build the final schedule. \n"
+        f"- EQUAL WORKLOAD: You MUST distribute the jobs evenly across the 5 Main Drivers. Do NOT cram all jobs onto one driver just because they have vehicle capacity. Ensure every driver gets a fair share of the 19:00 and 21:00/22:00 runs so no one is resting while another is overloaded.\n"
+        f"- Use their REAL NAMES.\n"
+        f"- Do NOT group geographically incompatible sites from Step 2.\n"
+        f"- Respect Lorry Capacity limits.\n"
+        f"Print the final schedule in a Markdown table with columns: Driver Name, Vehicle, Assigned Sites (with times), Total Workers."
     )
 
     candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
@@ -149,10 +147,10 @@ def run_dispatcher(api_key, shift_type):
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
-            # Temperature 0.1 locks the AI into strict logic mode so it stops hallucinating
+            # Temperature 0.0 forces the AI to be completely logical and fair based on instructions
             response = model.generate_content(
                 prompt,
-                generation_config=genai.types.GenerationConfig(temperature=0.1)
+                generation_config=genai.types.GenerationConfig(temperature=0.0) 
             )
             return response.text
         except Exception as e:
@@ -177,7 +175,7 @@ if st.button("Generate Dispatch Schedule", key="generate_schedule_btn"):
     if not api_key_input:
         st.error("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Analyzing Daily Ops, Map Coordinates, and generating schedule..."):
+        with st.spinner("Analyzing Daily Ops, Map Coordinates, and balancing driver workload..."):
             try:
                 schedule = run_dispatcher(api_key_input, shift_type)
                 st.success("Schedule generated successfully!")
