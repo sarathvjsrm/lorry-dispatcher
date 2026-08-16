@@ -19,7 +19,7 @@ api_key_input = st.sidebar.text_input("Gemini API Key", type="password")
 
 # --- ROBUST DATA EXTRACTION WITH EXPONENTIAL BACKOFF & CACHING ---
 @st.cache_data(ttl=300, show_spinner=False)
-jdef load_google_sheet_data():
+def load_google_sheet_data():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
@@ -52,7 +52,7 @@ jdef load_google_sheet_data():
             return daily_ops_data, sites, drivers
         except Exception as e:
             if "429" in str(e) and attempt < max_retries - 1:
-                time.sleep(2 * (attempt + 1)) # Wait longer before retrying
+                time.sleep(2 * (attempt + 1))
                 continue
             raise e
 
