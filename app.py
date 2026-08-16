@@ -95,8 +95,8 @@ def generate_dynamic_schedule(api_key, shift_type):
         f"(Table: Driver Name (Real Name) | Vehicle | Assigned Sites & Times | Total Workers)\n"
     )
 
-    # Updated to gemini-2.5-flash to bypass legacy deprecation 404 errors
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    # Updated to gemini-3.5-flash
+    model = genai.GenerativeModel("gemini-3.5-flash")
     response = model.generate_content(
         prompt,
         generation_config=genai.types.GenerationConfig(temperature=0.0) 
