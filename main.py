@@ -94,7 +94,7 @@ def load_google_sheet_data():
 
 def run_dispatcher(api_key, shift_type):
     """
-    Generates dispatch schedule using Gemini API with strict geographic and capacity rules.
+    Generates dispatch schedule using Gemini API with strict geographic, capacity, and mandatory dinner rules.
     """
     genai.configure(api_key=api_key)
     daily_ops_data, sites, drivers = load_google_sheet_data()
@@ -102,25 +102,33 @@ def run_dispatcher(api_key, shift_type):
     # Convert the raw Daily Ops grid into a readable string for the AI
     daily_ops_text = ""
     for row in daily_ops_data:
-        # Ignore completely empty rows to save tokens
         if any(str(cell).strip() for cell in row):
             daily_ops_text += " | ".join([str(cell).strip() for cell in row]) + "\n"
 
     prompt = (
         f"You are the Master Dispatcher for a Singapore logistics fleet.\n"
-        f"Generate an optimized lorry dispatch schedule for the '{shift_type}' shift based EXACTLY on the jobs filled out in the 'Daily Ops' data below.\n\n"
+        f"Generate an optimized lorry dispatch schedule for the '{shift_type}' shift based EXACTLY on the 'Daily Ops' data below.\n\n"
         f"--- TODAY'S WORKLOAD (DAILY OPS) ---\n"
         f"NOTE: Read this carefully. The top section contains regular shift end times. The bottom section (around row 24/25) contains 'SHIFTING WORKERS / Site-to-Site Transfers'. You must schedule BOTH.\n\n"
         f"{daily_ops_text}\n\n"
         f"--- SITE DATABASE (FOR LAT/LNG AND REGIONS) ---\n{sites}\n\n"
         f"--- FLEET DRIVERS ---\n{drivers}\n\n"
         f"CRITICAL DISPATCH RULES:\n"
-        f"1. GEOGRAPHIC REALITY (NO TELEPORTING): You MUST cross-reference the Daily Ops sites with the Site Database to estimate distance (using Latitude/Longitude or Region). A driver CANNOT pick up from two distant sites at the exact same time (e.g., Jurong and Woodlands at 21:00). If sites are distant, ASSIGN DIFFERENT DRIVERS.\n"
-        f"2. PRIORITIZE 5 MAIN DRIVERS: You MUST fill the 5 main OT drivers' schedules first. Maximize their routes (up to 25 pax for 14ft, 14 pax for 10ft) without causing time conflicts. Do not waste extra lorries.\n"
-        f"3. STAFF DRIVER BACKUP: ONLY utilize the Staff Driver if the main 5 drivers are completely full or if a route is geographically impossible for the main drivers to cover simultaneously.\n"
-        f"4. DINNER DRIVER (FOOD): For any sites ending at 22:00 (10 PM), you MUST assign a driver to bring food to that site beforehand. Clearly indicate this 'Dinner Delivery' duty in your output.\n\n"
-        f"Output the final schedule in a clear markdown table including: Driver Name, Vehicle, Assigned Sites, Pickup Times, Total Workers, and Dinner Duty.\n"
-        f"Below the table, provide a 'Routing Logic Check' showing the estimated travel time between clustered sites to prove the route is physically possible in Singapore."
+        f"1. GEOGRAPHIC REALITY: Use Lat/Lng and Regions to estimate distance. A driver CANNOT pick up from distant sites at the exact same time (e.g., West vs North). Assign DIFFERENT DRIVERS to distant sites.\n"
+        f"2. PRIORITIZE 5 MAIN DRIVERS: Fill their schedules first (up to 25 pax for 14ft, 14 pax for 10ft). Do not waste extra lorries.\n"
+        f"3. STAFF DRIVER BACKUP: ONLY utilize Staff Driver if the main 5 are completely full or geographically impossible.\n"
+        f"4. MANDATORY DINNER DELIVERY (10 PM SITES): You MUST identify every site ending at 22:00 (10 PM). You MUST explicitly assign a driver to deliver dinner to these sites before the pickup.\n\n"
+        f"YOU MUST USE THIS EXACT OUTPUT FORMAT:\n\n"
+        f"### 🍽️ DINNER DELIVERY ASSIGNMENTS (Strictly for 22:00 Sites)\n"
+        f"| 10 PM Site Name | Dinner Driver Assigned | Vehicle |\n"
+        f"|---|---|---|\n"
+        f"(List every 22:00 site and the driver assigned to bring them food)\n\n"
+        f"### 🚚 MAIN PICKUP DISPATCH SCHEDULE\n"
+        f"| Driver Name | Vehicle | Assigned Sites | Pickup Times | Total Workers |\n"
+        f"|---|---|---|---|---|\n"
+        f"(List all pickups here)\n\n"
+        f"### 🗺️ ROUTING LOGIC CHECK\n"
+        f"(Prove travel times between clustered sites are geographically possible in Singapore)"
     )
 
     candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
@@ -141,7 +149,7 @@ def run_dispatcher(api_key, shift_type):
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
-            # Setting temperature to 0.1 makes the AI strictly logical and stops hallucinations
+            # Temperature 0.1 locks the AI into strict logic mode so it stops hallucinating
             response = model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(temperature=0.1)
