@@ -16,7 +16,8 @@ SPREADSHEET_ID = config["spreadsheet_id"]
 st.sidebar.header("System Configuration")
 api_key_input = st.sidebar.text_input("Gemini API Key", type="password")
 
-# --- DATA EXTRACTION ENGINE ---
+# --- DATA EXTRACTION ENGINE WITH CACHING (Prevents 429 Quota Errors) ---
+@st.cache_data(ttl=60)
 def load_google_sheet_data():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -56,7 +57,6 @@ def generate_dynamic_schedule(api_key, shift_type):
     # 2. Extract REAL Driver Names programmatically to force the AI to use them
     driver_names_list = []
     for d in drivers:
-        # Tries to find common column headers for names, defaults to raw row if not found
         name = d.get("Driver Name", d.get("Name", d.get("Driver", str(list(d.values())[0]))))
         driver_names_list.append(name)
     
@@ -85,7 +85,6 @@ def generate_dynamic_schedule(api_key, shift_type):
         f"(Table: Driver Name (Real Name) | Vehicle | Assigned Sites & Times | Total Workers)\n"
     )
 
-    # Force strict logic mode
     model = genai.GenerativeModel("gemini-1.5-flash")
     response = model.generate_content(
         prompt,
