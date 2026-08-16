@@ -95,7 +95,8 @@ def generate_dynamic_schedule(api_key, shift_type):
         f"(Table: Driver Name (Real Name) | Vehicle | Assigned Sites & Times | Total Workers)\n"
     )
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    # Using gemini-2.0-flash which is widely supported across modern API versions
+    model = genai.GenerativeModel("gemini-2.0-flash")
     response = model.generate_content(
         prompt,
         generation_config=genai.types.GenerationConfig(temperature=0.0) 
@@ -115,4 +116,4 @@ if st.button("Generate Dynamic Schedule"):
                 st.success("Schedule Generated Successfully!")
                 st.markdown(schedule_output)
             except Exception as e:
-                st.error(f"System Error: {e}. (Tip: If quota error persists, wait 60 seconds for Google Sheet rate limits to reset.)")
+                st.error(f"System Error: {e}")
