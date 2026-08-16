@@ -1,4 +1,4 @@
 streamlit
-gspread
-google-auth
 google-generativeai
+gspread
+pandas
