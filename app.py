@@ -1,66 +1,29 @@
+import json
 import gspread
 import streamlit as st
 import google.generativeai as genai
 
-# Page Configuration
-st.set_page_config(page_title="Daily Lorry Dispatch Generator", page_icon="🚚", layout="wide")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Dynamic Lorry Dispatcher", page_icon="🚚", layout="wide")
+st.title("🚚 Dynamic Lorry Dispatch Generator")
 
-st.title("🚚 Daily Lorry Dispatch Generator")
+# Load external config
+with open("config.json", "r") as f:
+    config = json.load(f)
 
-# Sidebar for Gemini API Key input
-st.sidebar.header("Configuration")
-api_key_input = st.sidebar.text_input("Gemini API Key", type="password", key="gemini_api_key_input")
+SPREADSHEET_ID = config["spreadsheet_id"]
 
-SPREADSHEET_ID = "1AJXN_aUILuokaJhPLCTVb7IIwLnzc3gKpPCmfrJLOdY"
+st.sidebar.header("System Configuration")
+api_key_input = st.sidebar.text_input("Gemini API Key", type="password")
 
-
-def get_clean_records(worksheet):
-    """
-    Safely parses worksheet rows into dictionaries, avoiding errors with empty or duplicate header cells.
-    """
-    all_values = worksheet.get_all_values()
-    if not all_values or len(all_values) < 2:
-        return []
-    
-    raw_headers = all_values[0]
-    clean_headers = []
-    seen_counts = {}
-
-    for idx, header in enumerate(raw_headers):
-        h_text = str(header).strip()
-        if not h_text:
-            h_text = f"Column_{idx + 1}"
-        
-        if h_text in seen_counts:
-            seen_counts[h_text] += 1
-            h_text = f"{h_text}_{seen_counts[h_text]}"
-        else:
-            seen_counts[h_text] = 0
-            
-        clean_headers.append(h_text)
-
-    records = []
-    for row in all_values[1:]:
-        if not any(str(cell).strip() for cell in row):
-            continue
-        row_dict = {}
-        for idx, cell_val in enumerate(row):
-            if idx < len(clean_headers):
-                row_dict[clean_headers[idx]] = cell_val
-        records.append(row_dict)
-
-    return records
-
-
+# --- DATA EXTRACTION ENGINE ---
 def load_google_sheet_data():
-    """
-    Loads site database and fleet drivers directly by Spreadsheet ID with fallback handling.
-    """
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
     
+    # Authenticate using Streamlit secrets
     creds_dict = dict(st.secrets["gcp_service_account"])
     if "private_key" in creds_dict:
         creds_dict["private_key"] = str(creds_dict["private_key"]).replace("\\n", "\n")
@@ -68,93 +31,79 @@ def load_google_sheet_data():
     client = gspread.service_account_from_dict(creds_dict, scopes=scopes)
     sheet = client.open_by_key(SPREADSHEET_ID)
 
-    worksheets = sheet.worksheets()
-    sheet_names = [ws.title for ws in worksheets]
+    # Safely fetch dynamic worksheets
+    daily_ops_ws = sheet.worksheet("Daily_Ops")
+    site_ws = sheet.worksheet("Site_Database")
+    driver_ws = sheet.worksheet("Fleet_Drivers")
 
-    def get_worksheet_by_name(preferred_name, fallback_index):
-        for ws in worksheets:
-            if ws.title.strip().lower() == preferred_name.strip().lower():
-                return ws
-        if len(worksheets) > fallback_index:
-            return worksheets[fallback_index]
-        raise ValueError(f"Could not find worksheet '{preferred_name}'. Available tabs: {sheet_names}")
+    # Get raw grids
+    daily_ops_data = daily_ops_ws.get_all_values()
+    
+    # Parse Sites and Drivers into dynamic lists of dictionaries
+    sites = [dict(zip(site_ws.get_all_values()[0], row)) for row in site_ws.get_all_values()[1:] if any(row)]
+    drivers = [dict(zip(driver_ws.get_all_values()[0], row)) for row in driver_ws.get_all_values()[1:] if any(row)]
 
-    site_ws = get_worksheet_by_name("Site Database", 0)
-    driver_ws = get_worksheet_by_name("Fleet_Drivers", 1)
+    return daily_ops_data, sites, drivers
 
-    sites = get_clean_records(site_ws)
-    drivers = get_clean_records(driver_ws)
-
-    return sites, drivers
-
-
-def run_dispatcher(api_key, shift_type):
-    """
-    Generates dispatch schedule using Gemini API with automatic model fallback loop.
-    """
+# --- AI DISPATCH ENGINE ---
+def generate_dynamic_schedule(api_key, shift_type):
     genai.configure(api_key=api_key)
-    sites, drivers = load_google_sheet_data()
+    daily_ops_data, sites, drivers = load_google_sheet_data()
 
+    # 1. Format Daily Ops into readable text for any given day
+    daily_ops_text = "\n".join([" | ".join([str(cell).strip() for cell in row]) for row in daily_ops_data if any(row)])
+
+    # 2. Extract REAL Driver Names programmatically to force the AI to use them
+    driver_names_list = []
+    for d in drivers:
+        # Tries to find common column headers for names, defaults to raw row if not found
+        name = d.get("Driver Name", d.get("Name", d.get("Driver", str(list(d.values())[0]))))
+        driver_names_list.append(name)
+    
+    active_drivers_string = ", ".join(driver_names_list)
+
+    # 3. The Bulletproof Dynamic Prompt
     prompt = (
-        f"You are an expert logistics and lorry dispatch planner.\n"
-        f"Generate an optimized lorry dispatch schedule for the '{shift_type}' shift.\n\n"
-        f"--- SITE DATABASE ---\n{sites}\n\n"
-        f"--- FLEET DRIVERS ---\n{drivers}\n\n"
-        f"Please organize the output clearly with formatted tables and summary instructions."
+        f"You are a master Logistics AI. You are generating a schedule for the '{shift_type}' shift.\n\n"
+        f"--- TODAY'S DYNAMIC WORKLOAD ---\n{daily_ops_text}\n\n"
+        f"--- SITE DATABASE (COORDINATES) ---\n{sites}\n\n"
+        f"--- ACTIVE FLEET DRIVERS ---\n{drivers}\n\n"
+        
+        f"CRITICAL SYSTEM RULES (MUST OBEY):\n"
+        f"1. REAL DRIVER NAMES ONLY: You are strictly forbidden from using 'Driver 1', 'Driver 2', etc. "
+        f"You MUST assign jobs using ONLY these active names from the database: {active_drivers_string}.\n"
+        f"2. MATHEMATICAL BALANCING: Look at the total number of sites in Today's Workload. You MUST distribute these sites evenly across the active drivers. Do not overload one driver while leaving another empty.\n"
+        f"3. DYNAMIC DINNER DELIVERY: Identify ANY site in Today's Workload ending at 22:00. You MUST assign a specific driver (by their real name) to deliver food to them before pickup.\n"
+        f"4. TRAVEL REALITY: Use the Latitude/Longitude from the Site Database. Do not assign sites that are geographically impossible to reach sequentially.\n\n"
+        
+        f"OUTPUT FORMAT (Provide exactly these 3 sections in Markdown):\n\n"
+        f"### 🍽️ DINNER DELIVERY ASSIGNMENTS\n"
+        f"(Table: Site Name | Dinner Driver (Real Name) | Vehicle)\n\n"
+        f"### ⚖️ WORKLOAD BALANCING AUDIT\n"
+        f"(Briefly list each active driver by name and state exactly how many sites they were assigned to prove the load is balanced.)\n\n"
+        f"### 🚚 DYNAMIC DISPATCH SCHEDULE\n"
+        f"(Table: Driver Name (Real Name) | Vehicle | Assigned Sites & Times | Total Workers)\n"
     )
 
-    # Candidate models to try in order of performance and availability
-    candidate_models = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro"
-    ]
+    # Force strict logic mode
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    response = model.generate_content(
+        prompt,
+        generation_config=genai.types.GenerationConfig(temperature=0.0) 
+    )
+    return response.text
 
-    try:
-        listed = [
-            m.name.replace("models/", "")
-            for m in genai.list_models()
-            if "generateContent" in m.supported_generation_methods
-        ]
-        for item in listed:
-            if item not in candidate_models and "2.5" not in item:
-                candidate_models.append(item)
-    except Exception:
-        pass
+# --- USER INTERFACE ---
+shift_selection = st.selectbox("Select Shift Type", ["MORNING_0700_1500", "AFTERNOON_1500_2300", "EVENING_2100_2200", "NIGHT_2300_0700"])
 
-    last_exception = None
-    for model_name in candidate_models:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            last_exception = e
-            continue
-
-    raise last_exception
-
-
-# Main UI Elements
-shift_type = st.selectbox(
-    "Select Shift Type",
-    [
-        "EVENING_2100_2200",
-        "MORNING_0700_1500",
-        "AFTERNOON_1500_2300",
-        "NIGHT_2300_0700",
-    ],
-    key="shift_type_select"
-)
-
-if st.button("Generate Dispatch Schedule", key="generate_schedule_btn"):
+if st.button("Generate Dynamic Schedule"):
     if not api_key_input:
         st.error("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Fetching data from Google Sheets & generating schedule..."):
+        with st.spinner("Extracting real names, balancing workload mathematically, and routing..."):
             try:
-                schedule = run_dispatcher(api_key_input, shift_type)
-                st.success("Schedule generated successfully!")
-                st.markdown(schedule)
+                schedule_output = generate_dynamic_schedule(api_key_input, shift_selection)
+                st.success("Schedule Generated Successfully!")
+                st.markdown(schedule_output)
             except Exception as e:
-                st.error(f"Error generating schedule: {e}")
+                st.error(f"System Error: {e}")
