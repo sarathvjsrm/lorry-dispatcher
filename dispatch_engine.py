@@ -25,6 +25,19 @@ _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.
 with open(_CONFIG_PATH, "r") as f:
     config = json.load(f)
 
+"""
+Anderco evening dispatch engine — ONE-TIME brain rules (do not retune nightly)
+
+1. OT first (names on Fleet_Drivers). Staff only if OT cannot cover.
+2. Food only for sites ending >= 22:00; target arrive by 18:30 (hard 19:00).
+3. Pickup: board ~2 min after end (Infotech scan short). Show HQ return time always.
+4. After each pickup wave → HQ (drop workers at 3 Tuas View Circuit), then next wave.
+   Exception: same end-time + nearby sites = one trip then HQ.
+5. Shifts must finish before 19:00; prefer OT with NO food run (free 17:00–18:30).
+6. Staff: independent timed sorties (no 5PM wait / no OT padding).
+7. Balance OT jobs; location + capacity + timeline feasibility before assign.
+"""
+
 HQ_LAT = float(config.get("hq_lat", 1.2947675))
 HQ_LON = float(config.get("hq_lon", 103.6345739))
 EVENING_BUFFER_MIN = int(config.get("traffic_buffer_mins", 15))
@@ -34,8 +47,8 @@ DINNER_END_THRESHOLD = 22 * 60  # 22:00
 DINNER_TARGET = 18 * 60 + 30    # 18:30
 DINNER_HARD = 19 * 60           # 19:00
 
-PICKUP_AFTER_END = 10           # workers pack + Infotech scan
-PICKUP_HARD_EXTRA = 20          # absolute lateness allowed past deadline
+PICKUP_AFTER_END = 2  # workers board in ~2 min
+PICKUP_HARD_EXTRA = 15  # soft buffer only for traffic          # absolute lateness allowed past deadline
 
 # Geographic clustering
 CLUSTER_KM = 6.0                # max link distance to merge dinner sites
@@ -533,11 +546,14 @@ def verify_schedule(
                         f"LATE by {arrival - t['deadline']}min" if not ok
                         else f"soft late {arrival - t['deadline']}min"
                     )
+                    # return HQ after shift
+                    back = travel_from_hq(ti, evening=True) or 30
+                    hq_arrive = arrival + 3 + back
                     log.append(
                         (
                             f"Shift {t['label']}",
-                            f"leave HQ ~{fmt_time(leave)} → arrive {fmt_time(arrival)} "
-                            f"(need by {fmt_time(t['deadline'])}) [{status}]",
+                            f"leave HQ ~{fmt_time(leave)} → arrive to-site {fmt_time(arrival)} "
+                            f"(need by {fmt_time(t['deadline'])}) [{status}] → HQ ~{fmt_time(hq_arrive)}",
                             ok,
                         )
                     )
@@ -586,13 +602,19 @@ def verify_schedule(
                     log.append((f"Shift {t['label']}", "site not found", False))
                     fail = True
                     continue
+                leave = clock
                 d1 = haversine_km(cur[0], cur[1], fi["lat"], fi["lon"])
-                clock += (travel_min(d1) or 0) + 5
+                clock += (travel_min(d1) or 0) + 3  # load at from
                 d2 = haversine_km(fi["lat"], fi["lon"], ti["lat"], ti["lon"])
                 clock += travel_min(d2) or 0
                 arrival = clock
-                clock += 5
-                cur = (ti["lat"], ti["lon"])
+                clock += 3  # unload at to
+                # After shift, if next is not immediate pickup from 'to', return HQ
+                nxt = tasks[i + 1] if i + 1 < len(tasks) else None
+                back = travel_from_hq(ti, evening=True) or 30
+                hq_arrive = clock + back
+                clock = hq_arrive
+                cur = (HQ_LAT, HQ_LON)
                 ok = arrival <= t["hard"]
                 if not ok:
                     fail = True
@@ -600,7 +622,8 @@ def verify_schedule(
                 log.append(
                     (
                         f"Shift {t['label']}",
-                        f"arrive {fmt_time(arrival)} (need by {fmt_time(t['deadline'])}) [{status}]",
+                        f"leave ~{fmt_time(leave)} → arrive to-site {fmt_time(arrival)} "
+                        f"(need by {fmt_time(t['deadline'])}) [{status}] → HQ ~{fmt_time(hq_arrive)}",
                         ok,
                     )
                 )

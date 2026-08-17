@@ -18,7 +18,7 @@ st.set_page_config(page_title="Anderco Lorry Dispatcher", page_icon="🚚", layo
 st.title("🚚 Anderco Dynamic Lorry Dispatcher")
 st.caption(
     "Location-first · OT drivers first · Food only for ≥22:00 sites · "
-    "Pickup at end-time + 10 min (Infotech scan) · Traffic buffer only. "
+    "Pickup at end-time + 2 min (board ~2 min) · Traffic buffer only. "
     "All times from GPS + Site_Database travel records."
 )
 
@@ -144,7 +144,7 @@ if st.button("🚀 Generate Dispatch", type="primary"):
     st.subheader("🚚 Driver timelines")
     st.caption(
         "Pickup: driver may arrive early and **wait** until site end time "
-        "(workers still working / Infotech scan). Food must hit 6:30 PM."
+        "(workers still working / board ~2 min). Food must hit 6:30 PM."
     )
     # OT first in display
     ot_names = [d["name"] for d in fleet if d.get("is_ot")]
