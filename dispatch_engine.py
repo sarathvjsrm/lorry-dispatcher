@@ -715,24 +715,36 @@ def verify_schedule(
                     f"(need by {fmt_time(t['deadline'])}) [{status}]"
                 )
 
-            log.append(
-                (f"PICKUP {t['label']} ({t.get('workers', '?')} pax)", timing, ok)
-            )
-
+            # Same end-time + nearby: one trip (site1→site2→HQ). Otherwise always HQ after pickup
+            # (workers must be dropped at Anderco HQ / dormitory before next wave).
             nxt = tasks[i + 1] if i + 1 < len(tasks) else None
             chain = False
-            if nxt and nxt["type"] == "Pickup" and nxt.get("info"):
+            if (
+                nxt
+                and nxt["type"] == "Pickup"
+                and nxt.get("info")
+                and nxt.get("end_min") == end_min
+            ):
                 dd = haversine_km(
                     info["lat"], info["lon"], nxt["info"]["lat"], nxt["info"]["lon"]
                 )
                 if dd is not None and dd <= COMBINE_PICKUP_KM:
                     chain = True
             if chain:
+                timing = timing + " → next nearby same-time site (one trip)"
+                log.append(
+                    (f"PICKUP {t['label']} ({t.get('workers', '?')} pax)", timing, ok)
+                )
                 clock = pickup_done
                 cur = (info["lat"], info["lon"])
             else:
                 back = travel_from_hq(info, evening=True)
-                clock = pickup_done + back
+                hq_arrive = pickup_done + (back or 0)
+                timing = timing + f" → HQ ~{fmt_time(hq_arrive)}"
+                log.append(
+                    (f"PICKUP {t['label']} ({t.get('workers', '?')} pax)", timing, ok)
+                )
+                clock = hq_arrive
                 cur = (HQ_LAT, HQ_LON)
 
         results[driver] = {"fail": fail, "log": log}
@@ -904,11 +916,13 @@ def assign_drivers(
                 ]
             # Prefer drivers who already have work (fill continuous evening)
             # then drivers with 0 jobs (give every OT something)
+            # Balance OT: fill continuous evening but do not overload one driver
+            # Prefer OT with 1 job already (food) before giving a 3rd/4th; avoid 0-job OT only after
             ordered_pool = sorted(
                 ordered_pool,
                 key=lambda d: (
                     0 if d["name"] == pref else 1,
-                    0 if task_count[d["name"]] > 0 else 1,  # already busy OT preferred to pack continuous
+                    0 if task_count[d["name"]] == 1 else (1 if task_count[d["name"]] == 0 else 2),
                     task_count[d["name"]],
                     load[d["name"]],
                 ),
@@ -942,28 +956,42 @@ def assign_drivers(
             load[d["name"]] += j["workers"]
             task_count[d["name"]] += 1
 
-    # ---- Shifts: staff preferred ----
+    # ---- Shifts: prefer OT with light load (e.g. Pandi), one shift per driver when possible ----
+    shift_drivers_used: Set[str] = set()
     for s in shifts:
         avoided = avoid_for_job.get(f"SHIFT:{s['from']}", set())
         placed = False
-        for pool, _ in ((staff_list, "STAFF"), (ot_list, "OT")):
+        # OT first (maximise OT / keep staff for pure pickups), lightest load, prefer unused for shifts
+        for pool in (ot_list, staff_list):
             cands = [d for d in pool if d["name"] not in avoided]
-            cands.sort(key=lambda d: load[d["name"]])
+            cands.sort(
+                key=lambda d: (
+                    0 if d["name"] not in shift_drivers_used else 1,
+                    task_count[d["name"]],
+                    load[d["name"]],
+                )
+            )
             for d in cands:
-                if _driver_ok_with_job(
-                    d["name"], jobs, shifts, assignment, shift_assignment,
-                    new_shift={"from": s["from"], "to": s["to"]},
-                ):
-                    shift_assignment.append(
-                        {"from": s["from"], "to": s["to"], "driver": d["name"]}
-                    )
-                    load[d["name"]] += 2
-                    placed = True
-                    break
+                trial_shifts = shift_assignment + [
+                    {"from": s["from"], "to": s["to"], "driver": d["name"]}
+                ]
+                res = verify_schedule(
+                    jobs, shifts, assignment, trial_shifts, fleet=ordered
+                )
+                if res.get(d["name"], {}).get("fail"):
+                    continue
+                shift_assignment.append(
+                    {"from": s["from"], "to": s["to"], "driver": d["name"]}
+                )
+                load[d["name"]] += 2
+                task_count[d["name"]] += 1
+                shift_drivers_used.add(d["name"])
+                placed = True
+                break
             if placed:
                 break
-        if not placed and (staff_list or ot_list):
-            d = (staff_list or ot_list)[0]
+        if not placed and (ot_list or staff_list):
+            d = (ot_list + staff_list)[0]
             shift_assignment.append(
                 {"from": s["from"], "to": s["to"], "driver": d["name"]}
             )
