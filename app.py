@@ -64,7 +64,7 @@ with st.sidebar:
     st.header("Fleet (OT first)")
     df_fleet = pd.DataFrame(fleet)[["name", "vehicle", "type", "cap", "is_ot"]]
     st.dataframe(df_fleet, hide_index=True)
-    st.caption("OT = Mahendran, Sridhar, Kailing, Senthil, Pandi. Staff only if needed.")
+    st.caption("Names on Fleet_Drivers sheet = OT. Staff Driver N only if needed. Remove a name = on leave.")
 
 unresolved = [j["site_label"] for j in jobs if not j["info"]]
 if unresolved:

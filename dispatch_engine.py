@@ -429,6 +429,197 @@ def cluster_dinner_jobs(dinner_jobs: List[dict]) -> List[dict]:
 
 
 
+
+def verify_schedule(
+    jobs: List[dict],
+    shifts: List[dict],
+    assignment: Dict[str, dict],
+    shift_assignment: List[dict],
+) -> Dict[str, dict]:
+    """Simulate each driver's evening.
+
+    Pickup: if driver arrives early they WAIT until end_time (workers still on site).
+    Food must arrive by 18:30.
+    """
+    driver_tasks: Dict[str, List[dict]] = {}
+
+    for j in jobs:
+        a = assignment.get(j["site_label"])
+        if not a or not j["info"]:
+            continue
+        if a.get("dinner"):
+            driver_tasks.setdefault(a["dinner"], []).append(
+                {
+                    "type": "Dinner",
+                    "label": j["site_label"],
+                    "info": j["info"],
+                    "deadline": DINNER_TARGET,
+                    "hard": DINNER_HARD,
+                    "end_min": j["end_min"],
+                }
+            )
+        if a.get("pickup") and j["end_min"] is not None:
+            driver_tasks.setdefault(a["pickup"], []).append(
+                {
+                    "type": "Pickup",
+                    "label": j["site_label"],
+                    "info": j["info"],
+                    "deadline": j["end_min"] + PICKUP_AFTER_END,
+                    "hard": j["end_min"] + PICKUP_AFTER_END + PICKUP_HARD_EXTRA,
+                    "end_min": j["end_min"],
+                    "workers": j["workers"],
+                }
+            )
+
+    shift_lookup = {s["from"]: s for s in shifts}
+    for s in shift_assignment:
+        sinfo = shift_lookup.get(s["from"])
+        driver_tasks.setdefault(s["driver"], []).append(
+            {
+                "type": "Shift",
+                "label": f"{s['from']} -> {s['to']}",
+                "from_info": sinfo["from_info"] if sinfo else None,
+                "to_info": sinfo["to_info"] if sinfo else None,
+                "deadline": 19 * 60,
+                "hard": 19 * 60 + 15,
+            }
+        )
+
+    results: Dict[str, dict] = {}
+    for driver, tasks in driver_tasks.items():
+        def sort_key(t):
+            if t["type"] == "Dinner":
+                return (0, t["deadline"])
+            if t["type"] == "Shift":
+                return (1, t["deadline"])
+            return (2, t["deadline"])
+
+        tasks.sort(key=sort_key)
+        cur = (HQ_LAT, HQ_LON)
+        clock = 17 * 60
+        log = []
+        fail = False
+
+        for i, t in enumerate(tasks):
+            if t["type"] == "Shift":
+                fi, ti = t.get("from_info"), t.get("to_info")
+                if not fi or not ti:
+                    log.append((f"Shift {t['label']}", "site not found", False))
+                    fail = True
+                    continue
+                d1 = haversine_km(cur[0], cur[1], fi["lat"], fi["lon"])
+                clock += (travel_min(d1) or 0) + 5
+                d2 = haversine_km(fi["lat"], fi["lon"], ti["lat"], ti["lon"])
+                clock += travel_min(d2) or 0
+                arrival = clock
+                clock += 5
+                cur = (ti["lat"], ti["lon"])
+                ok = arrival <= t["deadline"]
+                if arrival > t["hard"]:
+                    fail = True
+                status = "OK" if ok else f"LATE by {arrival - t['deadline']}min"
+                log.append(
+                    (
+                        f"Shift {t['label']}",
+                        f"arrive {fmt_time(arrival)} (need by {fmt_time(t['deadline'])}) [{status}]",
+                        ok,
+                    )
+                )
+                continue
+
+            info = t["info"]
+            if not info or info.get("lat") is None:
+                log.append((f"{t['type']} {t['label']}", "missing coordinates", False))
+                fail = True
+                continue
+
+            from_hq = abs(cur[0] - HQ_LAT) < 0.001 and abs(cur[1] - HQ_LON) < 0.001
+            if from_hq:
+                trav = travel_from_hq(info, evening=True)
+            else:
+                d = haversine_km(cur[0], cur[1], info["lat"], info["lon"])
+                trav = travel_min(d, evening=True) or 40
+
+            arrival = clock + trav
+
+            if t["type"] == "Dinner":
+                # Soft target 18:30; only hard-fail past 19:00
+                ok = arrival <= t["hard"]
+                if arrival > t["hard"]:
+                    fail = True
+                if arrival <= t["deadline"]:
+                    status = "OK"
+                elif arrival <= t["hard"]:
+                    status = f"soft late {arrival - t['deadline']}min (before 7PM OK)"
+                else:
+                    status = f"LATE by {arrival - t['deadline']}min"
+                log.append(
+                    (
+                        f"FOOD {t['label']}",
+                        f"leave ~{fmt_time(clock)} → arrive {fmt_time(arrival)} "
+                        f"(need by {fmt_time(t['deadline'])}) [{status}]",
+                        ok,
+                    )
+                )
+                clock = arrival + 8  # unload food
+                cur = (info["lat"], info["lon"])
+                # If next work is a late pickup, return to HQ and idle there
+                nxt = tasks[i + 1] if i + 1 < len(tasks) else None
+                if nxt and nxt["type"] == "Pickup" and (nxt.get("end_min") or 0) >= 21 * 60:
+                    back = travel_from_hq(info, evening=True)
+                    clock = clock + (back or 0)
+                    cur = (HQ_LAT, HQ_LON)
+                continue
+
+            # PICKUP — wait until end_min if early
+            end_min = t.get("end_min") or t["deadline"] - PICKUP_AFTER_END
+            service_start = max(arrival, end_min)
+            pickup_done = service_start + PICKUP_AFTER_END
+            ok = arrival <= t["deadline"]
+            if arrival > t["hard"]:
+                fail = True
+
+            if arrival < end_min:
+                wait = end_min - arrival
+                timing = (
+                    f"leave ~{fmt_time(clock)} → arrive site {fmt_time(arrival)} "
+                    f"(wait {wait} min for end {fmt_time(end_min)}) → "
+                    f"pickup ready ~{fmt_time(pickup_done)} "
+                    f"[OK — on time for {fmt_time(t['deadline'])}]"
+                )
+                ok = True
+            else:
+                late = arrival - t["deadline"]
+                status = "OK" if ok else f"LATE by {late}min"
+                timing = (
+                    f"leave ~{fmt_time(clock)} → arrive {fmt_time(arrival)} "
+                    f"(need by {fmt_time(t['deadline'])}) [{status}]"
+                )
+
+            log.append(
+                (f"PICKUP {t['label']} ({t.get('workers', '?')} pax)", timing, ok)
+            )
+
+            nxt = tasks[i + 1] if i + 1 < len(tasks) else None
+            chain = False
+            if nxt and nxt["type"] == "Pickup" and nxt.get("info"):
+                dd = haversine_km(
+                    info["lat"], info["lon"], nxt["info"]["lat"], nxt["info"]["lon"]
+                )
+                if dd is not None and dd <= COMBINE_PICKUP_KM:
+                    chain = True
+            if chain:
+                clock = pickup_done
+                cur = (info["lat"], info["lon"])
+            else:
+                back = travel_from_hq(info, evening=True)
+                clock = pickup_done + back
+                cur = (HQ_LAT, HQ_LON)
+
+        results[driver] = {"fail": fail, "log": log}
+    return results
+
+
 def _ot_first(fleet: List[dict]) -> List[dict]:
     ot = [d for d in fleet if d.get("is_ot")]
     staff = [d for d in fleet if not d.get("is_ot")]
@@ -542,18 +733,37 @@ def assign_drivers(
             return True
         return False
 
-    # ---- Phase A: food clusters — OT first ----
+    # ---- Phase A: food clusters — OT first; split if combined fails ----
     for cl in clusters:
         if try_assign_cluster(cl, ot_list, "OT"):
             continue
         if try_assign_cluster(cl, staff_list, "STAFF"):
             continue
-        cluster_notes.append(
-            "⚠️ NO DRIVER for "
-            + f"{cl['workers']}-person cluster: "
-            + ", ".join(j["site_label"] for j in cl["jobs"])
-            + f" (need capacity >= {cl['workers']})"
-        )
+        # Split into single-site food runs (still OT first)
+        if len(cl["jobs"]) > 1:
+            cluster_notes.append(
+                f"ℹ️ Could not combine {cl['workers']} pax cluster — assigning each site separately"
+            )
+            for j in cl["jobs"]:
+                sub = {
+                    "jobs": [j],
+                    "workers": j["workers"],
+                    "route_time": cl["route_time"],
+                }
+                if try_assign_cluster(sub, ot_list, "OT"):
+                    continue
+                if try_assign_cluster(sub, staff_list, "STAFF"):
+                    continue
+                cluster_notes.append(
+                    f"⚠️ NO DRIVER for food site {j['site_label']} ({j['workers']} pax)"
+                )
+        else:
+            cluster_notes.append(
+                "⚠️ NO DRIVER for "
+                + f"{cl['workers']}-person cluster: "
+                + ", ".join(j["site_label"] for j in cl["jobs"])
+                + f" (need capacity >= {cl['workers']})"
+            )
 
     # ---- Phase B/C: all other pickups — latest end first, OT first, check timeline ----
     others = sorted(
