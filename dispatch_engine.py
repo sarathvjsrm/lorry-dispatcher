@@ -430,17 +430,24 @@ def cluster_dinner_jobs(dinner_jobs: List[dict]) -> List[dict]:
 
 
 
+
 def verify_schedule(
     jobs: List[dict],
     shifts: List[dict],
     assignment: Dict[str, dict],
     shift_assignment: List[dict],
+    fleet: Optional[List[dict]] = None,
 ) -> Dict[str, dict]:
     """Simulate each driver's evening.
 
-    Pickup: if driver arrives early they WAIT until end_time (workers still on site).
-    Food must arrive by 18:30.
+    OT drivers: continuous day from ~5PM (food → 7PM → 9/10PM).
+    Staff drivers: each pickup is an independent HQ→site→HQ sortie timed
+    to the end window (no 5PM wait — they don't get OT).
     """
+    ot_names: Set[str] = set()
+    if fleet:
+        ot_names = {d["name"] for d in fleet if d.get("is_ot")}
+
     driver_tasks: Dict[str, List[dict]] = {}
 
     for j in jobs:
@@ -487,6 +494,8 @@ def verify_schedule(
 
     results: Dict[str, dict] = {}
     for driver, tasks in driver_tasks.items():
+        is_ot = driver in ot_names if ot_names else not driver.startswith("Staff")
+
         def sort_key(t):
             if t["type"] == "Dinner":
                 return (0, t["deadline"])
@@ -495,11 +504,80 @@ def verify_schedule(
             return (2, t["deadline"])
 
         tasks.sort(key=sort_key)
-        cur = (HQ_LAT, HQ_LON)
-        clock = 17 * 60
         log = []
         fail = False
 
+        if not is_ot:
+            # ---- STAFF: independent sorties from HQ, timed to each job ----
+            for t in tasks:
+                if t["type"] == "Shift":
+                    fi, ti = t.get("from_info"), t.get("to_info")
+                    if not fi or not ti:
+                        log.append((f"Shift {t['label']}", "site not found", False))
+                        fail = True
+                        continue
+                    # leave HQ so arrive ~deadline
+                    d1 = travel_from_hq(fi, evening=True)
+                    leave = t["deadline"] - (d1 or 40) - 10
+                    if leave < 17 * 60:
+                        leave = 17 * 60
+                    clock = leave + (d1 or 40)
+                    d2 = haversine_km(fi["lat"], fi["lon"], ti["lat"], ti["lon"])
+                    clock += travel_min(d2) or 0
+                    arrival = clock
+                    ok = arrival <= t["hard"]
+                    if not ok:
+                        fail = True
+                    status = "OK" if arrival <= t["deadline"] else (
+                        f"LATE by {arrival - t['deadline']}min" if not ok
+                        else f"soft late {arrival - t['deadline']}min"
+                    )
+                    log.append(
+                        (
+                            f"Shift {t['label']}",
+                            f"leave HQ ~{fmt_time(leave)} → arrive {fmt_time(arrival)} "
+                            f"(need by {fmt_time(t['deadline'])}) [{status}]",
+                            ok,
+                        )
+                    )
+                    continue
+
+                info = t["info"]
+                if not info or info.get("lat") is None:
+                    log.append((f"{t['type']} {t['label']}", "missing coordinates", False))
+                    fail = True
+                    continue
+                trav = travel_from_hq(info, evening=True)
+                end_min = t.get("end_min") or t["deadline"] - PICKUP_AFTER_END
+                # Leave HQ to arrive near end_min (staff don't wait from 5PM)
+                leave = end_min - trav
+                if leave < 17 * 60:
+                    leave = 17 * 60
+                arrival = leave + trav
+                ok = arrival <= t["hard"]
+                if not ok:
+                    fail = True
+                if arrival <= end_min + 5:
+                    timing = (
+                        f"leave HQ ~{fmt_time(leave)} → arrive ~{fmt_time(arrival)} "
+                        f"for end {fmt_time(end_min)} [OK — staff timed pickup]"
+                    )
+                    ok = True
+                else:
+                    status = "OK" if ok else f"LATE by {arrival - t['deadline']}min"
+                    timing = (
+                        f"leave HQ ~{fmt_time(leave)} → arrive {fmt_time(arrival)} "
+                        f"(need by {fmt_time(t['deadline'])}) [{status}]"
+                    )
+                log.append(
+                    (f"PICKUP {t['label']} ({t.get('workers', '?')} pax)", timing, ok)
+                )
+            results[driver] = {"fail": fail, "log": log}
+            continue
+
+        # ---- OT: continuous evening from 5PM ----
+        cur = (HQ_LAT, HQ_LON)
+        clock = 17 * 60
         for i, t in enumerate(tasks):
             if t["type"] == "Shift":
                 fi, ti = t.get("from_info"), t.get("to_info")
@@ -514,10 +592,10 @@ def verify_schedule(
                 arrival = clock
                 clock += 5
                 cur = (ti["lat"], ti["lon"])
-                ok = arrival <= t["deadline"]
-                if arrival > t["hard"]:
+                ok = arrival <= t["hard"]
+                if not ok:
                     fail = True
-                status = "OK" if ok else f"LATE by {arrival - t['deadline']}min"
+                status = "OK" if arrival <= t["deadline"] else f"LATE by {arrival - t['deadline']}min"
                 log.append(
                     (
                         f"Shift {t['label']}",
@@ -538,14 +616,34 @@ def verify_schedule(
                 trav = travel_from_hq(info, evening=True)
             else:
                 d = haversine_km(cur[0], cur[1], info["lat"], info["lon"])
-                trav = travel_min(d, evening=True) or 40
+                # Short site-to-site hop: less buffer (already on the road)
+                use_eve = not (d is not None and d <= COMBINE_PICKUP_KM)
+                trav = travel_min(d, evening=use_eve) or 40
+
+            # Same-end nearby pair: leave HQ later so both pickups fit around end_min
+            if (
+                t["type"] == "Pickup"
+                and from_hq
+                and i + 1 < len(tasks)
+                and tasks[i + 1]["type"] == "Pickup"
+                and tasks[i + 1].get("end_min") == t.get("end_min")
+                and tasks[i + 1].get("info")
+            ):
+                dd = haversine_km(
+                    info["lat"], info["lon"],
+                    tasks[i + 1]["info"]["lat"], tasks[i + 1]["info"]["lon"],
+                )
+                if dd is not None and dd <= COMBINE_PICKUP_KM:
+                    # leave so we arrive first site ~ end_min - 5
+                    ideal_leave = (t.get("end_min") or t["deadline"]) - trav - 15
+                    if ideal_leave > clock:
+                        clock = ideal_leave
 
             arrival = clock + trav
 
             if t["type"] == "Dinner":
-                # Soft target 18:30; only hard-fail past 19:00
                 ok = arrival <= t["hard"]
-                if arrival > t["hard"]:
+                if not ok:
                     fail = True
                 if arrival <= t["deadline"]:
                     status = "OK"
@@ -561,21 +659,42 @@ def verify_schedule(
                         ok,
                     )
                 )
-                clock = arrival + 8  # unload food
+                clock = arrival + 8
                 cur = (info["lat"], info["lon"])
-                # If next work is a late pickup, return to HQ and idle there
+                # Return HQ before late pickups
                 nxt = tasks[i + 1] if i + 1 < len(tasks) else None
                 if nxt and nxt["type"] == "Pickup" and (nxt.get("end_min") or 0) >= 21 * 60:
                     back = travel_from_hq(info, evening=True)
                     clock = clock + (back or 0)
                     cur = (HQ_LAT, HQ_LON)
+                elif nxt and nxt["type"] == "Dinner":
+                    # continue to next food site
+                    pass
+                elif nxt is None or (nxt.get("end_min") or 0) >= 21 * 60:
+                    back = travel_from_hq(info, evening=True)
+                    clock = clock + (back or 0)
+                    cur = (HQ_LAT, HQ_LON)
                 continue
 
-            # PICKUP — wait until end_min if early
+            # OT PICKUP — wait until end if early (slightly earlier if chaining same-end neighbour)
             end_min = t.get("end_min") or t["deadline"] - PICKUP_AFTER_END
-            service_start = max(arrival, end_min)
+            chain_next = False
+            if (
+                i + 1 < len(tasks)
+                and tasks[i + 1]["type"] == "Pickup"
+                and tasks[i + 1].get("end_min") == end_min
+                and tasks[i + 1].get("info")
+            ):
+                dd = haversine_km(
+                    info["lat"], info["lon"],
+                    tasks[i + 1]["info"]["lat"], tasks[i + 1]["info"]["lon"],
+                )
+                if dd is not None and dd <= COMBINE_PICKUP_KM:
+                    chain_next = True
+            wait_until = end_min - (10 if chain_next else 0)
+            service_start = max(arrival, wait_until)
             pickup_done = service_start + PICKUP_AFTER_END
-            ok = arrival <= t["deadline"]
+            ok = arrival <= t["hard"]
             if arrival > t["hard"]:
                 fail = True
 
@@ -653,7 +772,7 @@ def _driver_ok_with_job(
         trial_a[new_site] = cur
     if new_shift:
         trial_s = trial_s + [{**new_shift, "driver": driver_name}]
-    res = verify_schedule(jobs, shifts, trial_a, trial_s)
+    res = verify_schedule(jobs, shifts, trial_a, trial_s, fleet=None)
     r = res.get(driver_name)
     if not r:
         return True
@@ -716,7 +835,7 @@ def assign_drivers(
             trial = {k: dict(v) for k, v in assignment.items()}
             for j in cl["jobs"]:
                 trial[j["site_label"]] = {"dinner": d["name"], "pickup": d["name"]}
-            res = verify_schedule(jobs, shifts, trial, shift_assignment)
+            res = verify_schedule(jobs, shifts, trial, shift_assignment, fleet=ordered)
             if res.get(d["name"], {}).get("fail"):
                 continue
             # accept
@@ -801,7 +920,7 @@ def assign_drivers(
                     continue
                 trial = {k: dict(v) for k, v in assignment.items()}
                 trial[j["site_label"]] = {"dinner": None, "pickup": d["name"]}
-                res = verify_schedule(jobs, shifts, trial, shift_assignment)
+                res = verify_schedule(jobs, shifts, trial, shift_assignment, fleet=ordered)
                 if res.get(d["name"], {}).get("fail"):
                     continue
                 assignment[j["site_label"]] = {"dinner": None, "pickup": d["name"]}
@@ -878,7 +997,7 @@ def assign_and_verify(
         assignment, shift_assignment, cluster_notes, load = assign_drivers(
             jobs, shifts, fleet, avoid_for_job=avoid_for_job
         )
-        results = verify_schedule(jobs, shifts, assignment, shift_assignment)
+        results = verify_schedule(jobs, shifts, assignment, shift_assignment, fleet=fleet)
         failing = {d: r for d, r in results.items() if r["fail"]}
 
         if not failing:
