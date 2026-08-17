@@ -775,44 +775,11 @@ def verify_schedule(
     return results
 
 
+
 def _ot_first(fleet: List[dict]) -> List[dict]:
     ot = [d for d in fleet if d.get("is_ot")]
     staff = [d for d in fleet if not d.get("is_ot")]
-    ot_sorted = sorted(
-        ot,
-        key=lambda d: OT_ORDER.index(d["name"]) if d["name"] in OT_ORDER else 99,
-    )
-    return ot_sorted + staff
-
-
-def _driver_ok_with_job(
-    driver_name: str,
-    jobs: List[dict],
-    shifts: List[dict],
-    assignment: Dict[str, dict],
-    shift_assignment: List[dict],
-    new_site: Optional[str] = None,
-    new_dinner: bool = False,
-    new_pickup: bool = True,
-    new_shift: Optional[dict] = None,
-) -> bool:
-    """Temporarily add a job for this driver and check their timeline stays feasible."""
-    trial_a = {k: dict(v) for k, v in assignment.items()}
-    trial_s = list(shift_assignment)
-    if new_site:
-        cur = trial_a.get(new_site, {"dinner": None, "pickup": None})
-        if new_dinner:
-            cur["dinner"] = driver_name
-        if new_pickup:
-            cur["pickup"] = driver_name
-        trial_a[new_site] = cur
-    if new_shift:
-        trial_s = trial_s + [{**new_shift, "driver": driver_name}]
-    res = verify_schedule(jobs, shifts, trial_a, trial_s, fleet=None)
-    r = res.get(driver_name)
-    if not r:
-        return True
-    return not r["fail"]
+    return ot + staff
 
 
 def assign_drivers(
@@ -820,226 +787,234 @@ def assign_drivers(
     shifts: List[dict],
     fleet: List[dict],
     avoid_for_job: Optional[Dict[str, Set[str]]] = None,
-):
-    """
-    Pack OT drivers full first (feasibility-checked), staff only when no OT fits.
+) -> Tuple[Dict[str, dict], List[dict], List[str], Dict[str, int]]:
+    """Human logistics-manager style assignment.
 
-    Order of work:
-      1. 22:00 food clusters → OT with capacity, timeline OK
-      2. Remaining 22:00 / 21:00 / 19:00 pickups → OT first if timeline OK
-      3. Staff only if every OT fails capacity or timeline
-      4. Shifts → staff preferred
-
-    Anyone on Fleet_Drivers is OT. Removed name = on leave (not in fleet).
+    Priority order every night:
+      1. Map sites by end-time + geography
+      2. Food (>=22:00) → OT, nearby sites share one food run when feasible
+      3. Shifts (before 7pm) → OT with no food run (free 5:00–6:30)
+      4. Pickups → balance OT (equalish job count + pax), HQ between waves
+      5. Staff only for leftover pickups (timed, no OT padding)
     """
     avoid_for_job = avoid_for_job or {}
     ordered = _ot_first(fleet)
     ot_list = [d for d in ordered if d.get("is_ot")]
     staff_list = [d for d in ordered if not d.get("is_ot")]
 
-    load = {d["name"]: 0 for d in ordered}
-    task_count = {d["name"]: 0 for d in ordered}
-    dinner_used: Set[str] = set()
-    assignment: Dict[str, dict] = {}
+    assignment: Dict[str, dict] = {
+        j["site_label"]: {"dinner": None, "pickup": None} for j in jobs
+    }
     shift_assignment: List[dict] = []
     cluster_notes: List[str] = []
+    load: Dict[str, int] = {d["name"]: 0 for d in ordered}
+    task_count: Dict[str, int] = {d["name"]: 0 for d in ordered}
+    dinner_used: Set[str] = set()
 
-    dinner_jobs = [j for j in jobs if j["is_dinner"]]
-    other_jobs = [j for j in jobs if not j["is_dinner"]]
+    def ot_balance_key(d):
+        # Prefer fewer tasks then lighter pax — keeps OT evenings even
+        return (task_count[d["name"]], load[d["name"]], d["name"])
+
+    def can_take(driver_name: str, trial_assignment=None, trial_shifts=None) -> bool:
+        a = trial_assignment if trial_assignment is not None else assignment
+        sa = trial_shifts if trial_shifts is not None else shift_assignment
+        res = verify_schedule(jobs, shifts, a, sa, fleet=ordered)
+        return not res.get(driver_name, {}).get("fail", False)
+
+    # ---------- Phase A: FOOD (OT only, balance) ----------
+    dinner_jobs = [j for j in jobs if j.get("is_dinner")]
+    other_jobs = [j for j in jobs if not j.get("is_dinner")]
     clusters = cluster_dinner_jobs(dinner_jobs)
 
-    def hist_name(j: dict) -> Optional[str]:
-        if not j.get("info"):
-            return None
-        hist = j["info"].get("driver") or ""
-        for d in ordered:
-            if d["vehicle"] and d["vehicle"] in hist:
-                return d["name"]
-            if d["name"] and d["name"].lower() in hist.lower():
-                return d["name"]
-        return None
-
-    def try_assign_cluster(cl, pool, tag_prefix):
+    def try_food_cluster(cl, pool):
         avoided: Set[str] = set()
         for j in cl["jobs"]:
             avoided |= avoid_for_job.get(j["site_label"], set())
-        # Prefer OT with fewer tasks so we spread 10PM work
-        candidates = [d for d in pool if d["name"] not in avoided and d["cap"] >= cl["workers"] and d["name"] not in dinner_used]
-        candidates.sort(key=lambda d: (task_count[d["name"]], load[d["name"]]))
-        for d in candidates:
-            # trial assignment
+        cands = [
+            d for d in pool
+            if d["name"] not in avoided
+            and d["name"] not in dinner_used
+            and d["cap"] >= cl["workers"]
+        ]
+        cands.sort(key=ot_balance_key)
+        for d in cands:
             trial = {k: dict(v) for k, v in assignment.items()}
             for j in cl["jobs"]:
                 trial[j["site_label"]] = {"dinner": d["name"], "pickup": d["name"]}
-            res = verify_schedule(jobs, shifts, trial, shift_assignment, fleet=ordered)
-            if res.get(d["name"], {}).get("fail"):
+            if not can_take(d["name"], trial_assignment=trial):
                 continue
-            # accept
             dinner_used.add(d["name"])
             load[d["name"]] += cl["workers"]
             task_count[d["name"]] += 1
             for j in cl["jobs"]:
                 assignment[j["site_label"]] = {"dinner": d["name"], "pickup": d["name"]}
             cluster_notes.append(
-                f"[{tag_prefix}] {d['name']} ({d['vehicle']}, {d['type']}, cap {d['cap']}) → "
+                f"[OT] {d['name']} ({d['vehicle']}, {d['type']}, cap {d['cap']}) → "
                 + ", ".join(j["site_label"] for j in cl["jobs"])
-                + f"  [{cl['workers']} pax, ~{cl['route_time']} min food route]"
+                + f"  [{cl['workers']} pax food+pickup]"
             )
             return True
         return False
 
-    # ---- Phase A: food clusters — OT first; split if combined fails ----
     for cl in clusters:
-        if try_assign_cluster(cl, ot_list, "OT"):
+        if try_food_cluster(cl, ot_list):
             continue
-        if try_assign_cluster(cl, staff_list, "STAFF"):
-            continue
-        # Split into single-site food runs (still OT first)
+        # split if combined fails
         if len(cl["jobs"]) > 1:
             cluster_notes.append(
-                f"ℹ️ Could not combine {cl['workers']} pax cluster — assigning each site separately"
+                f"ℹ️ Split {cl['workers']} pax food cluster (combined route not feasible)"
             )
             for j in cl["jobs"]:
-                sub = {
-                    "jobs": [j],
-                    "workers": j["workers"],
-                    "route_time": cl["route_time"],
-                }
-                if try_assign_cluster(sub, ot_list, "OT"):
-                    continue
-                if try_assign_cluster(sub, staff_list, "STAFF"):
-                    continue
-                cluster_notes.append(
-                    f"⚠️ NO DRIVER for food site {j['site_label']} ({j['workers']} pax)"
-                )
+                sub = {"jobs": [j], "workers": j["workers"], "route_time": 0}
+                if not try_food_cluster(sub, ot_list):
+                    cluster_notes.append(
+                        f"⚠️ NO OT for food {j['site_label']} ({j['workers']} pax)"
+                    )
         else:
             cluster_notes.append(
-                "⚠️ NO DRIVER for "
-                + f"{cl['workers']}-person cluster: "
-                + ", ".join(j["site_label"] for j in cl["jobs"])
-                + f" (need capacity >= {cl['workers']})"
+                f"⚠️ NO OT for food cluster {cl['workers']} pax"
             )
 
-    # ---- Phase B/C: all other pickups — latest end first, OT first, check timeline ----
-    others = sorted(
-        other_jobs,
-        key=lambda j: (-(j["end_min"] or 0), -j["workers"]),
-    )
-    for j in others:
-        if j["site_label"] in assignment and assignment[j["site_label"]].get("pickup"):
-            continue
-        avoided = avoid_for_job.get(j["site_label"], set())
-        pref = hist_name(j)
-
-        def try_pool(pool):
-            # historical OT first if in pool
-            ordered_pool = list(pool)
-            if pref:
-                ordered_pool = [d for d in pool if d["name"] == pref] + [
-                    d for d in pool if d["name"] != pref
-                ]
-            # Prefer drivers who already have work (fill continuous evening)
-            # then drivers with 0 jobs (give every OT something)
-            # Balance OT: fill continuous evening but do not overload one driver
-            # Prefer OT with 1 job already (food) before giving a 3rd/4th; avoid 0-job OT only after
-            ordered_pool = sorted(
-                ordered_pool,
-                key=lambda d: (
-                    0 if d["name"] == pref else 1,
-                    0 if task_count[d["name"]] == 1 else (1 if task_count[d["name"]] == 0 else 2),
-                    task_count[d["name"]],
-                    load[d["name"]],
-                ),
-            )
-            for d in ordered_pool:
-                if d["name"] in avoided:
-                    continue
-                if d["cap"] < j["workers"]:
-                    continue
-                trial = {k: dict(v) for k, v in assignment.items()}
-                trial[j["site_label"]] = {"dinner": None, "pickup": d["name"]}
-                res = verify_schedule(jobs, shifts, trial, shift_assignment, fleet=ordered)
-                if res.get(d["name"], {}).get("fail"):
-                    continue
-                assignment[j["site_label"]] = {"dinner": None, "pickup": d["name"]}
-                load[d["name"]] += j["workers"]
-                task_count[d["name"]] += 1
-                return True
-            return False
-
-        if try_pool(ot_list):
-            continue
-        if try_pool(staff_list):
-            continue
-        # last resort: force onto lightest OT even if verify fails (repair loop will move)
-        fallback = [d for d in ot_list + staff_list if d["cap"] >= j["workers"]]
-        fallback.sort(key=lambda d: task_count[d["name"]])
-        if fallback:
-            d = fallback[0]
-            assignment[j["site_label"]] = {"dinner": None, "pickup": d["name"]}
-            load[d["name"]] += j["workers"]
-            task_count[d["name"]] += 1
-
-    # ---- Shifts (must finish before 7PM) ----
-    # Real ops: OT free in early evening (no food run) should do shifts, e.g. Pandi at 5:30.
-    # Staff only if no OT can finish by 7PM. Prefer one shift per driver when possible.
-    shift_drivers_used: Set[str] = set()
-    # Who already has a food run? They leave ~5PM for food — less ideal for shifts
-    has_food = set()
-    for j in jobs:
-        if j.get("is_dinner"):
-            a = assignment.get(j["site_label"]) or {}
-            if a.get("dinner"):
-                has_food.add(a["dinner"])
-
-    for s in shifts:
+    # ---------- Phase B: SHIFTS before 7pm ----------
+    # Try to put ALL shifts on ONE free OT (no food) so other OT stay free for 7PM.
+    free_ot = [d for d in ot_list if d["name"] not in dinner_used]
+    free_ot.sort(key=lambda d: (task_count[d["name"]], load[d["name"]]))
+    remaining_shifts = list(shifts)
+    if free_ot and remaining_shifts:
+        for d in free_ot:
+            trial_sa = [
+                {"from": s["from"], "to": s["to"], "driver": d["name"]}
+                for s in remaining_shifts
+            ]
+            if can_take(d["name"], trial_shifts=trial_sa):
+                for s in remaining_shifts:
+                    shift_assignment.append(
+                        {"from": s["from"], "to": s["to"], "driver": d["name"]}
+                    )
+                    cluster_notes.append(
+                        f"Shift {s['from']} → {s['to']} → {d['name']}"
+                    )
+                load[d["name"]] += 2 * len(remaining_shifts)
+                task_count[d["name"]] += len(remaining_shifts)
+                remaining_shifts = []
+                break
+    # Leftover shifts one-by-one
+    for s in remaining_shifts:
         avoided = avoid_for_job.get(f"SHIFT:{s['from']}", set())
         placed = False
-        for pool in (ot_list, staff_list):
+        for pool in (
+            [d for d in ot_list if d["name"] not in dinner_used],
+            ot_list,
+            staff_list,
+        ):
             cands = [d for d in pool if d["name"] not in avoided]
-            # Prefer: no food run, not already on a shift, fewer tasks, lighter load
-            cands.sort(
-                key=lambda d: (
-                    0 if d["name"] not in has_food else 1,
-                    0 if d["name"] not in shift_drivers_used else 1,
-                    task_count[d["name"]],
-                    load[d["name"]],
-                )
-            )
+            cands.sort(key=lambda d: (task_count[d["name"]], load[d["name"]]))
             for d in cands:
-                trial_shifts = shift_assignment + [
+                trial_sa = shift_assignment + [
                     {"from": s["from"], "to": s["to"], "driver": d["name"]}
                 ]
-                res = verify_schedule(
-                    jobs, shifts, assignment, trial_shifts, fleet=ordered
-                )
-                if res.get(d["name"], {}).get("fail"):
+                if not can_take(d["name"], trial_shifts=trial_sa):
                     continue
                 shift_assignment.append(
                     {"from": s["from"], "to": s["to"], "driver": d["name"]}
                 )
                 load[d["name"]] += 2
                 task_count[d["name"]] += 1
-                shift_drivers_used.add(d["name"])
+                placed = True
+                cluster_notes.append(
+                    f"Shift {s['from']} → {s['to']} → {d['name']}"
+                )
+                break
+            if placed:
+                break
+        if not placed:
+            cluster_notes.append(
+                f"⚠️ NO DRIVER for shift {s['from']} → {s['to']}"
+            )
+
+    # ---------- Phase C: remaining pickups — balance OT ----------
+    # Jobs that still need a pickup driver
+    pending = []
+    for j in jobs:
+        if j["end_min"] is None:
+            continue
+        a = assignment[j["site_label"]]
+        if not a.get("pickup"):
+            pending.append(j)
+        # dinner-only already set pickup with dinner; skip
+
+    # Sort: latest end first, then more workers (harder jobs first)
+    pending.sort(key=lambda j: (-(j["end_min"] or 0), -(j["workers"] or 0)))
+
+    for j in pending:
+        avoided = avoid_for_job.get(j["site_label"], set())
+        placed = False
+        # OT first, balanced; then staff
+        for pool, tag in ((ot_list, "OT"), (staff_list, "STAFF")):
+            cands = [
+                d for d in pool
+                if d["name"] not in avoided and d["cap"] >= (j["workers"] or 0)
+            ]
+            cands.sort(key=ot_balance_key)
+            for d in cands:
+                trial = {k: dict(v) for k, v in assignment.items()}
+                trial[j["site_label"]] = {
+                    "dinner": trial[j["site_label"]].get("dinner"),
+                    "pickup": d["name"],
+                }
+                if not can_take(d["name"], trial_assignment=trial):
+                    continue
+                assignment[j["site_label"]]["pickup"] = d["name"]
+                load[d["name"]] += j["workers"] or 0
+                task_count[d["name"]] += 1
                 placed = True
                 break
             if placed:
                 break
-        if not placed and (ot_list or staff_list):
-            # last resort: OT without food, else any
-            fallback = [d for d in ot_list if d["name"] not in has_food] or ot_list or staff_list
-            d = fallback[0]
-            shift_assignment.append(
-                {"from": s["from"], "to": s["to"], "driver": d["name"]}
+        if not placed:
+            cluster_notes.append(
+                f"⚠️ NO DRIVER for pickup {j['site_label']} ({j['workers']} pax)"
             )
 
-    idle_ot = [d["name"] for d in ot_list if task_count[d["name"]] == 0]
-    if idle_ot and jobs:
-        cluster_notes.append(
-            "ℹ️ Idle OT after packing (no feasible slot left): " + ", ".join(idle_ot)
-        )
-    busy = [f"{d['name']}={task_count[d['name']]} jobs" for d in ot_list]
-    cluster_notes.append("OT load: " + ", ".join(busy))
+    # ---------- Phase D: fill idle OT with any staff-held job they can take ----------
+    # Move work from staff → idle/light OT when feasible (maximise OT)
+    staff_names = {d["name"] for d in staff_list}
+    for j in jobs:
+        a = assignment.get(j["site_label"]) or {}
+        pk = a.get("pickup")
+        if not pk or pk not in staff_names:
+            continue
+        # try lightest OT
+        cands = [d for d in ot_list if d["cap"] >= (j["workers"] or 0)]
+        cands.sort(key=ot_balance_key)
+        for d in cands:
+            trial = {k: dict(v) for k, v in assignment.items()}
+            trial[j["site_label"]] = {
+                "dinner": trial[j["site_label"]].get("dinner"),
+                "pickup": d["name"],
+            }
+            if not can_take(d["name"], trial_assignment=trial):
+                continue
+            # also check staff is ok without this job (always ok)
+            assignment[j["site_label"]]["pickup"] = d["name"]
+            load[d["name"]] += j["workers"] or 0
+            task_count[d["name"]] += 1
+            load[pk] = max(0, load[pk] - (j["workers"] or 0))
+            task_count[pk] = max(0, task_count[pk] - 1)
+            cluster_notes.append(
+                f"↩️ Moved {j['site_label']} from {pk} → OT {d['name']} (maximise OT)"
+            )
+            break
+
+    # Summary note
+    ot_summary = ", ".join(
+        f"{d['name']}={task_count[d['name']]} jobs/{load[d['name']]} pax"
+        for d in ot_list
+    )
+    cluster_notes.append(f"OT balance: {ot_summary}")
+    idle = [d["name"] for d in ot_list if task_count[d["name"]] == 0]
+    if idle:
+        cluster_notes.append(f"ℹ️ Idle OT (no feasible slot): {', '.join(idle)}")
 
     return assignment, shift_assignment, cluster_notes, load
 
@@ -1048,61 +1023,43 @@ def assign_and_verify(
     jobs: List[dict],
     shifts: List[dict],
     fleet: List[dict],
-    max_iterations: int = 15,
-):
-    avoid_for_job: Dict[str, Set[str]] = {}
-    iteration_log: List[str] = []
-    results: Dict[str, dict] = {}
+    max_repairs: int = 12,
+) -> Tuple[Dict[str, dict], List[dict], List[str], Dict[str, int], Dict[str, dict], List[str]]:
+    """Assign then repair: move failing jobs off overloaded drivers and retry."""
+    avoid: Dict[str, Set[str]] = {}
+    log: List[str] = []
     assignment: Dict[str, dict] = {}
     shift_assignment: List[dict] = []
     cluster_notes: List[str] = []
     load: Dict[str, int] = {}
+    results: Dict[str, dict] = {}
 
-    for attempt in range(max_iterations):
+    for attempt in range(1, max_repairs + 1):
         assignment, shift_assignment, cluster_notes, load = assign_drivers(
-            jobs, shifts, fleet, avoid_for_job=avoid_for_job
+            jobs, shifts, fleet, avoid_for_job=avoid
         )
-        results = verify_schedule(jobs, shifts, assignment, shift_assignment, fleet=fleet)
-        failing = {d: r for d, r in results.items() if r["fail"]}
-
+        results = verify_schedule(
+            jobs, shifts, assignment, shift_assignment, fleet=fleet
+        )
+        failing = [n for n, r in results.items() if r.get("fail")]
         if not failing:
-            iteration_log.append(
-                f"Attempt {attempt + 1}: all clear — verified feasible."
-            )
-            return (
-                assignment,
-                shift_assignment,
-                cluster_notes,
-                load,
-                results,
-                iteration_log,
-            )
-
-        moved = False
-        for driver, res in failing.items():
-            for task, timing, ok in res["log"]:
-                if ok:
-                    continue
-                if task.startswith("Shift "):
-                    frm = task[len("Shift ") :].split(" -> ")[0]
-                    key = f"SHIFT:{frm}"
-                elif task.startswith("PICKUP "):
-                    key = task[len("PICKUP ") :].rsplit(" (", 1)[0]
-                elif task.startswith("FOOD "):
-                    key = task[len("FOOD ") :]
-                else:
-                    continue
-                avoid_for_job.setdefault(key, set()).add(driver)
-                moved = True
-        iteration_log.append(
-            f"Attempt {attempt + 1}: CONFLICT on {', '.join(sorted(failing))} — "
-            "moving failing job(s) to another driver and re-verifying."
-        )
-        if not moved:
-            iteration_log.append("No movable jobs left — stopping repair.")
+            log.append(f"Attempt {attempt}: all clear — verified feasible.")
             break
+        log.append(
+            f"Attempt {attempt}: conflict on {', '.join(failing)} — "
+            "moving failing job(s) off that driver and retrying."
+        )
+        # Mark jobs on failing drivers as avoid for them
+        for j in jobs:
+            a = assignment.get(j["site_label"]) or {}
+            for role in ("dinner", "pickup"):
+                dn = a.get(role)
+                if dn in failing:
+                    avoid.setdefault(j["site_label"], set()).add(dn)
+        for s in shift_assignment:
+            if s["driver"] in failing:
+                avoid.setdefault(f"SHIFT:{s['from']}", set()).add(s["driver"])
+        if attempt == max_repairs:
+            log.append("Could not fully clear after repairs — see conflicts.")
 
-    iteration_log.append(
-        f"Stopped after {max_iterations} repair attempts — remaining conflicts need manual check."
-    )
-    return assignment, shift_assignment, cluster_notes, load, results, iteration_log
+    return assignment, shift_assignment, cluster_notes, load, results, log
