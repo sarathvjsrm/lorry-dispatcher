@@ -1,85 +1,75 @@
-# 🚚 Dynamic Lorry Dispatch Generator
+# Anderco Dynamic Lorry Dispatcher
 
-## What changed (and why the old version failed)
+Deterministic evening dispatch for Anderco lorries.
 
-The original `app.py` dumped your whole Daily_Ops/Site_Database/Fleet_Drivers
-data into a text prompt and asked Gemini to *imagine* a schedule as free-form
-markdown. An LLM is not a calculator - it produced plausible-**looking**
-times (round numbers like 18:00, 18:15, 21:00, 21:30) with no real distance
-or travel-time computation behind them at all. That's how it ended up
-sending one driver from Tuas to Punggol in a claimed 30 minutes when the
-real drive is 83 minutes - the model never called a distance function,
-because there wasn't one in the code to call.
+## Business rules (built into the engine)
 
-This version replaces that with `dispatch_engine.py`: plain, deterministic
-Python that:
+1. **Pickup = end time + 10 minutes**  
+   Workers finish work, scan Infotech, then board. Drivers must not pick up at 5–6 PM for a 9–10 PM site. If the lorry arrives early, it **waits** at the site until end time.
 
-1. **Computes real distances** - haversine formula between every pair of
-   real GPS coordinates in your `Site_Database`.
-2. **Computes real travel time** - `distance_km * 2 + 10 min base + 15 min
-   evening traffic buffer`, calibrated against your team's actual WhatsApp
-   chat history.
-3. **Clusters 10 PM (dinner) sites** only when they're close enough AND a
-   full nearest-neighbour route through the cluster actually fits inside a
-   120-minute driving budget - not just "under 25 people and under 8km apart
-   on paper."
-4. **Balances load across your fleet** - prefers a site's historical driver
-   only if that driver isn't already carrying 2+ other jobs; otherwise picks
-   whichever eligible driver currently has the least load. This is what
-   stops one driver (e.g. Mahendran) from silently absorbing every job in
-   "his" territory while others sit idle.
-5. **Verifies every driver's entire evening** - simulates each task in
-   order with real travel times and flags anything that's actually late,
-   not just plausible-sounding.
-6. **Repairs conflicts automatically** - if step 5 finds a driver overloaded,
-   it steers the specific conflicting job to a different driver (checking
-   your other primary drivers first, then falling back to the staff/backup
-   pool: Saravanan, Tianwei, Ramesh) and re-verifies, up to 6 attempts. If it
-   still can't resolve everything, it says so honestly in the schedule
-   instead of hiding a broken plan behind a green checkmark.
+2. **Food only for sites ending at or after 22:00**  
+   Food must arrive by **18:30** (hard cutoff 19:00). Sites ending 19:00 or 21:00 do **not** get a food run.
 
-Tested end-to-end against your actual live Daily_Ops/Site_Database data
-(16 sites, 92 workers, 2 dinner clusters): the first pass came back with 2
-overloaded drivers (one carrying 56 workers' worth of jobs alone); the
-repair loop resolved it in 6 attempts down to 8 drivers all clear, load
-spread 4-29 instead of one driver doing everything.
+3. **Location first**  
+   Nearby 22:00 sites are clustered on one lorry when workers fit (≤25) and the food route is driveable.
 
-No API key is required to run this anymore - the scheduling logic doesn't
-call any AI model. It reads live from the same Google Sheet as before
-(`Daily_Ops`, `Site_Database`, `Fleet_Drivers`).
+4. **OT drivers first**  
+   Order: **Mahendran → Sridhar → Kailing → Senthil → Pandi**.  
+   Staff drivers only when OT cannot cover. Named **Staff Driver 1, 2, …**
 
-## File Structure
-* **`dispatch_engine.py`** - all the real logic (parsing, distance math,
-  clustering, assignment, verification, repair loop). No Streamlit or
-  Google Sheets dependency in here, so it can be tested standalone.
-* **`app.py`** - thin Streamlit UI. Loads the sheet, calls
-  `dispatch_engine.assign_and_verify()`, displays the result.
-* **`main.py`** - execution wrapper (unchanged).
-* **`config.json`** - HQ coordinates, traffic buffer, spreadsheet ID.
-* **`requirements.txt`** - `streamlit`, `gspread`, `pandas` (no longer
-  needs `google-generativeai`).
+5. **OT work continuously**  
+   Only traffic buffer (+15 min) is added to travel times.
 
-## Setup Instructions
-1. Install dependencies: `pip install -r requirements.txt`
-2. Ensure your `.streamlit/secrets.toml` contains your `gcp_service_account`
-   credentials (unchanged from before).
-3. Run the app: `python main.py` or `streamlit run app.py`
+6. **Return to HQ** after a pickup before the next distant job. Nearby same-band pickups can be chained.
 
-## Testing the engine without a live Google Sheets connection
-`dispatch_engine.py` has no Streamlit/gspread imports, so you can unit-test
-it directly:
+## You do not need Python on your PC
 
-```python
-from dispatch_engine import parse_site_database, parse_fleet, parse_daily_ops, assign_and_verify
+### Option A — GitHub Codespaces (browser)
 
-# raw_rows = same list-of-lists format gspread's get_all_values() returns
-site_lookup = parse_site_database(site_raw_rows)
-fleet = parse_fleet(driver_raw_rows)
-jobs, shifts = parse_daily_ops(daily_ops_raw_rows, site_lookup)
+1. Open the repo on GitHub  
+2. Code → Codespaces → Create codespace  
+3. In the terminal:
+   ```bash
+   pip install -r requirements.txt
+   streamlit run app.py
+   ```
+4. Open the forwarded URL. Add Google service-account secret (below).
 
-assignment, shift_assignment, cluster_notes, load, results, iteration_log = assign_and_verify(jobs, shifts, fleet)
+### Option B — Streamlit Community Cloud
+
+1. Push this repo to GitHub  
+2. Deploy at share.streamlit.io with `app.py`  
+3. Add secrets under Settings → Secrets
+
+### Streamlit secrets (GCP service account)
+
+```toml
+[gcp_service_account]
+type = "service_account"
+project_id = "..."
+private_key_id = "..."
+private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+client_email = "...@....iam.gserviceaccount.com"
+client_id = "..."
+token_uri = "https://oauth2.googleapis.com/token"
 ```
 
-`results` gives you, per driver, `fail` (True/False) and a `log` of every
-task with its real computed arrival time versus its deadline - the same
-verification the UI displays.
+Share the Google Sheet with `client_email` as Editor.
+
+## Daily workflow
+
+1. Daily_Ops: enter Site / End Time / Workers (shifts if any)  
+2. Open dispatcher → Generate Dispatch  
+3. Copy Dinner / Pickup drivers into Daily_Ops if needed  
+4. Read timelines: food by 6:30, pickups at end+10
+
+## Config (`config.json`)
+
+```json
+{
+  "spreadsheet_id": "1AJXN_aUILuokaJhPLCTVb7IIwLnzc3gKpPCmfrJLOdY",
+  "traffic_buffer_mins": 15,
+  "hq_lat": 1.2947675,
+  "hq_lon": 103.6345739
+}
+```
