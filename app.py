@@ -10,20 +10,22 @@ from dispatch_engine import (
     parse_daily_ops,
     assign_and_verify,
     EVENING_BUFFER_MIN,
+    DINNER_END_THRESHOLD,
+    fmt_time,
 )
 
-st.set_page_config(page_title="Dynamic Lorry Dispatcher", page_icon="🚚", layout="wide")
-st.title("🚚 Dynamic Lorry Dispatch Generator")
+st.set_page_config(page_title="Anderco Lorry Dispatcher", page_icon="🚚", layout="wide")
+st.title("🚚 Anderco Dynamic Lorry Dispatcher")
 st.caption(
-    "Real GPS distances, real travel-time math, real capacity limits. "
-    "Nothing here is guessed by an AI text model - every number is computed "
-    "by dispatch_engine.py, which is unit-tested and doesn't depend on this UI."
+    "Location-first · OT drivers first · Food only for ≥22:00 sites · "
+    "Pickup at end-time + 10 min (Infotech scan) · Traffic buffer only. "
+    "All times from GPS + Site_Database travel records."
 )
 
 SPREADSHEET_ID = config["spreadsheet_id"]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def load_google_sheet_data():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -34,20 +36,16 @@ def load_google_sheet_data():
         creds_dict["private_key"] = str(creds_dict["private_key"]).replace("\\n", "\n")
     client = gspread.service_account_from_dict(creds_dict, scopes=scopes)
 
-    max_retries = 3
-    for attempt in range(max_retries):
+    for attempt in range(3):
         try:
             sheet = client.open_by_key(SPREADSHEET_ID)
-            daily_ops_ws = sheet.worksheet("Daily_Ops")
-            site_ws = sheet.worksheet("Site_Database")
-            driver_ws = sheet.worksheet("Fleet_Drivers")
             return (
-                daily_ops_ws.get_all_values(),
-                site_ws.get_all_values(),
-                driver_ws.get_all_values(),
+                sheet.worksheet("Daily_Ops").get_all_values(),
+                sheet.worksheet("Site_Database").get_all_values(),
+                sheet.worksheet("Fleet_Drivers").get_all_values(),
             )
         except Exception as e:
-            if "429" in str(e) and attempt < max_retries - 1:
+            if "429" in str(e) and attempt < 2:
                 time.sleep(2 * (attempt + 1))
                 continue
             raise e
@@ -59,75 +57,112 @@ try:
     fleet = parse_fleet(driver_raw)
     jobs, shifts = parse_daily_ops(daily_ops_raw, site_lookup)
 except Exception as e:
-    st.error(f"Could not load Google Sheet data: {e}")
+    st.error(f"Could not load Google Sheet: {e}")
     st.stop()
 
-st.sidebar.header("Fleet loaded")
-st.sidebar.dataframe(pd.DataFrame(fleet)[["name", "vehicle", "type", "cap"]])
+with st.sidebar:
+    st.header("Fleet (OT first)")
+    df_fleet = pd.DataFrame(fleet)[["name", "vehicle", "type", "cap", "is_ot"]]
+    st.dataframe(df_fleet, hide_index=True)
+    st.caption("OT = Mahendran, Sridhar, Kailing, Senthil, Pandi. Staff only if needed.")
 
 unresolved = [j["site_label"] for j in jobs if not j["info"]]
 if unresolved:
     st.warning(
-        "These sites in Daily_Ops couldn't be matched to Site_Database "
-        "(check spelling / add them to Site_Database): " + ", ".join(unresolved)
+        "Sites not matched in Site_Database (fix spelling / add row): "
+        + ", ".join(unresolved)
     )
 
+dinner_count = sum(1 for j in jobs if j["is_dinner"])
 st.write(
-    f"**Tonight's workload:** {len(jobs)} sites, "
-    f"{sum(j['workers'] for j in jobs)} workers, "
-    f"{sum(1 for j in jobs if j['is_dinner'])} sites need food, "
-    f"{len(shifts)} shifting task(s)."
+    f"**Tonight:** {len(jobs)} sites · {sum(j['workers'] for j in jobs)} workers · "
+    f"**{dinner_count} need food** (≥22:00) · {len(shifts)} shift(s)"
 )
 
-if st.button("🚀 Generate Verified Dispatch Schedule"):
-    with st.spinner("Clustering sites, checking real travel times, verifying every driver's evening..."):
-        assignment, shift_assignment, cluster_notes, load, results, iteration_log = assign_and_verify(
-            jobs, shifts, fleet
-        )
+# Preview table
+preview = []
+for j in jobs:
+    end = fmt_time(j["end_min"]) if j["end_min"] is not None else "?"
+    preview.append(
+        {
+            "Site": j["site_label"],
+            "End": end,
+            "Workers": j["workers"],
+            "Food?": "YES" if j["is_dinner"] else "—",
+            "Pickup window": (
+                f"{fmt_time(j['end_min'] + 10)}" if j["end_min"] is not None else "?"
+            ),
+            "Coords": "OK" if j["info"] and j["info"].get("lat") else "MISSING",
+        }
+    )
+st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
 
-    with st.expander("🔁 How the engine got here (repair attempts)"):
+if st.button("🚀 Generate Dispatch", type="primary"):
+    with st.spinner("Clustering by location · OT-first assign · verifying timelines..."):
+        (
+            assignment,
+            shift_assignment,
+            cluster_notes,
+            load,
+            results,
+            iteration_log,
+        ) = assign_and_verify(jobs, shifts, fleet)
+
+    with st.expander("Repair attempts"):
         for line in iteration_log:
             st.write("- " + line)
 
     any_fail = any(r["fail"] for r in results.values())
     if any_fail:
-        st.error(
-            "⚠️ One or more drivers have a real conflict - see the red rows below. "
-            "Consider moving that job to a backup driver."
-        )
+        st.error("Some drivers still have conflicts — see red expanders.")
     else:
-        st.success(
-            "✅ Verified feasible - every driver's evening was simulated with real "
-            "travel times and nothing is late past the hard cutoff."
-        )
+        st.success("All drivers feasible under traffic buffer + pickup windows.")
 
-    st.subheader("🍽️ Meal / Dinner Delivery Assignments")
-    dinner_rows = []
+    # Assignment summary for Daily_Ops paste-back
+    st.subheader("📋 Assignment (paste into Daily_Ops Dinner / Pickup columns)")
+    rows = []
     for j in jobs:
-        a = assignment.get(j["site_label"])
-        if a and a["dinner"]:
-            dinner_rows.append(
-                {"Site": j["site_label"], "Driver": a["dinner"], "Workers to feed": j["workers"]}
-            )
-    st.table(pd.DataFrame(dinner_rows))
+        a = assignment.get(j["site_label"], {})
+        rows.append(
+            {
+                "Site": j["site_label"],
+                "End": fmt_time(j["end_min"]) if j["end_min"] else "",
+                "Workers": j["workers"],
+                "Dinner Driver": a.get("dinner") or "",
+                "Pickup Driver": a.get("pickup") or "",
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-    st.subheader("🧩 How the dinner clusters were built (route-time checked)")
-    for note in cluster_notes:
-        st.write("- " + note)
+    st.subheader("🍽️ Food clusters (22:00+ only)")
+    if cluster_notes:
+        for note in cluster_notes:
+            st.write("- " + note)
+    else:
+        st.write("No 22:00+ sites tonight — no food runs.")
 
-    st.subheader("🚚 Full Dispatch Schedule (by driver)")
-    for driver, res in results.items():
+    st.subheader("🚚 Driver timelines")
+    st.caption(
+        "Pickup: driver may arrive early and **wait** until site end time "
+        "(workers still working / Infotech scan). Food must hit 6:30 PM."
+    )
+    # OT first in display
+    ot_names = [d["name"] for d in fleet if d.get("is_ot")]
+    ordered_drivers = [n for n in ot_names if n in results] + [
+        n for n in results if n not in ot_names
+    ]
+    for driver in ordered_drivers:
+        res = results[driver]
         icon = "🔴" if res["fail"] else "🟢"
-        with st.expander(f"{icon} {driver} - {'CONFLICT' if res['fail'] else 'OK'}"):
+        tag = "OT" if driver in ot_names else "STAFF"
+        with st.expander(f"{icon} [{tag}] {driver} — {'CONFLICT' if res['fail'] else 'OK'}"):
             df = pd.DataFrame(res["log"], columns=["Task", "Timing", "OK"])
             st.table(df)
 
     if shift_assignment:
-        st.subheader("🔄 Shifting Workers")
+        st.subheader("🔄 Shifting workers")
         st.table(pd.DataFrame(shift_assignment))
 
     st.caption(
-        "All times above are computed from real GPS coordinates in Site_Database "
-        f"(haversine distance x2 + 10min base + {EVENING_BUFFER_MIN}min evening buffer), "
-        "not generated or guessed by an AI model."
+        f"Travel = Site_Database real minutes (or km×2+10) + {EVENING_BUFFER_MIN} min traffic buffer."
     )
