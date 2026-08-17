@@ -1,121 +1,133 @@
-import json
 import time
 import gspread
 import streamlit as st
-import google.generativeai as genai
+import pandas as pd
 
-# --- CONFIGURATION ---
+from dispatch_engine import (
+    config,
+    parse_site_database,
+    parse_fleet,
+    parse_daily_ops,
+    assign_and_verify,
+    EVENING_BUFFER_MIN,
+)
+
 st.set_page_config(page_title="Dynamic Lorry Dispatcher", page_icon="🚚", layout="wide")
 st.title("🚚 Dynamic Lorry Dispatch Generator")
-
-# Load external config
-with open("config.json", "r") as f:
-    config = json.load(f)
+st.caption(
+    "Real GPS distances, real travel-time math, real capacity limits. "
+    "Nothing here is guessed by an AI text model - every number is computed "
+    "by dispatch_engine.py, which is unit-tested and doesn't depend on this UI."
+)
 
 SPREADSHEET_ID = config["spreadsheet_id"]
 
-st.sidebar.header("System Configuration")
-api_key_input = st.sidebar.text_input("Gemini API Key", type="password")
 
-# --- ROBUST DATA EXTRACTION WITH EXPONENTIAL BACKOFF & CACHING ---
 @st.cache_data(ttl=300, show_spinner=False)
 def load_google_sheet_data():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
+        "https://www.googleapis.com/auth/drive",
     ]
-    
     creds_dict = dict(st.secrets["gcp_service_account"])
     if "private_key" in creds_dict:
         creds_dict["private_key"] = str(creds_dict["private_key"]).replace("\\n", "\n")
-        
     client = gspread.service_account_from_dict(creds_dict, scopes=scopes)
-    
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
             sheet = client.open_by_key(SPREADSHEET_ID)
-            
             daily_ops_ws = sheet.worksheet("Daily_Ops")
             site_ws = sheet.worksheet("Site_Database")
             driver_ws = sheet.worksheet("Fleet_Drivers")
-
-            daily_ops_data = daily_ops_ws.get_all_values()
-            site_data = site_ws.get_all_values()
-            driver_data = driver_ws.get_all_values()
-
-            sites = [dict(zip(site_data[0], row)) for row in site_data[1:] if any(row)]
-            drivers = [dict(zip(driver_data[0], row)) for row in driver_data[1:] if any(row)]
-
-            return daily_ops_data, sites, drivers
+            return (
+                daily_ops_ws.get_all_values(),
+                site_ws.get_all_values(),
+                driver_ws.get_all_values(),
+            )
         except Exception as e:
             if "429" in str(e) and attempt < max_retries - 1:
                 time.sleep(2 * (attempt + 1))
                 continue
             raise e
 
-# --- AI DISPATCH ENGINE ---
-def generate_dynamic_schedule(api_key, shift_type):
-    genai.configure(api_key=api_key)
-    daily_ops_data, sites, drivers = load_google_sheet_data()
 
-    daily_ops_text = "\n".join([" | ".join([str(cell).strip() for cell in row]) for row in daily_ops_data if any(row)])
+try:
+    daily_ops_raw, site_raw, driver_raw = load_google_sheet_data()
+    site_lookup = parse_site_database(site_raw)
+    fleet = parse_fleet(driver_raw)
+    jobs, shifts = parse_daily_ops(daily_ops_raw, site_lookup)
+except Exception as e:
+    st.error(f"Could not load Google Sheet data: {e}")
+    st.stop()
 
-    driver_specs = []
-    for d in drivers:
-        name = d.get("Driver No.", d.get("Driver Name", d.get("Name", ""))).strip()
-        cap_str = d.get("Max Capacity", "25")
-        try:
-            cap = int(cap_str)
-        except:
-            cap = 25
-        if name:
-            driver_specs.append(f"- Driver: {name} | Vehicle: {d.get('Vehicle Code')} | Type: {d.get('Type')} | Max Legal Capacity: {cap} pax")
+st.sidebar.header("Fleet loaded")
+st.sidebar.dataframe(pd.DataFrame(fleet)[["name", "vehicle", "type", "cap"]])
 
-    drivers_summary_text = "\n".join(driver_specs)
-
-    primary_driver_names = ["Mahendran", "Sridhar", "Kailing", "Senthil", "Pandi"]
-    primary_string = ", ".join(primary_driver_names)
-
-    prompt = (
-        f"You are a master Logistics AI. You are generating a schedule for the '{shift_type}' shift.\n\n"
-        f"--- TODAY'S DYNAMIC WORKLOAD ---\n{daily_ops_text}\n\n"
-        f"--- SITE DATABASE (COORDINATES & DETAILS) ---\n{sites}\n\n"
-        f"--- FLEET DRIVERS & STRICT LEGAL CAPACITIES ---\n{drivers_summary_text}\n\n"
-        
-        f"CRITICAL OPERATIONAL RULES (MUST OBEY):\n"
-        f"1. LOGICAL MEAL/DINNER DELIVERY TIMING: Workers must receive their food BEFORE their break starts (e.g., if break/pickup is around 19:00, food delivery must arrive by 18:15 - 18:30 at the latest!). Never schedule a food delivery *after* the meal break time.\n"
-        f"2. STRICT MAXIMUM CAPACITY LAW: You are legally FORBIDDEN from assigning a worker count to any driver exceeding their 'Max Legal Capacity' (e.g., Senthil max is 14 pax, do NOT overload him).\n"
-        f"3. DRIVER PRIORITY: Use the primary 5 drivers first ({primary_string}).\n"
-        f"4. GEOGRAPHIC & TIMING REALITY: Use the Latitude/Longitude from the Site Database to ensure sequential pickups are physically possible.\n\n"
-        
-        f"OUTPUT FORMAT (Provide exactly these 3 sections in Markdown):\n\n"
-        f"### 🍽️ MEAL / DINNER DELIVERY ASSIGNMENTS\n"
-        f"(Table: Site Name | Driver Name | Vehicle | Delivery Arrival Time - Must be before break)\n\n"
-        f"### ⚖️ LEGAL CAPACITY & TIMING AUDIT\n"
-        f"(Verify that all meal deliveries arrive before break times and that no driver exceeds capacity limits.)\n\n"
-        f"### 🚚 DYNAMIC DISPATCH SCHEDULE\n"
-        f"(Table: Driver Name | Vehicle | Assigned Sites & Times | Total Workers | Capacity Check Status)\n"
+unresolved = [j["site_label"] for j in jobs if not j["info"]]
+if unresolved:
+    st.warning(
+        "These sites in Daily_Ops couldn't be matched to Site_Database "
+        "(check spelling / add them to Site_Database): " + ", ".join(unresolved)
     )
 
-    model = genai.GenerativeModel("gemini-3.5-flash")
-    response = model.generate_content(
-        prompt,
-        generation_config=genai.types.GenerationConfig(temperature=0.0) 
-    )
-    return response.text
+st.write(
+    f"**Tonight's workload:** {len(jobs)} sites, "
+    f"{sum(j['workers'] for j in jobs)} workers, "
+    f"{sum(1 for j in jobs if j['is_dinner'])} sites need food, "
+    f"{len(shifts)} shifting task(s)."
+)
 
-# --- USER INTERFACE ---
-shift_selection = st.selectbox("Select Shift Type", ["MORNING_0700_1500", "AFTERNOON_1500_2300", "EVENING_2100_2200", "NIGHT_2300_0700"])
+if st.button("🚀 Generate Verified Dispatch Schedule"):
+    with st.spinner("Clustering sites, checking real travel times, verifying every driver's evening..."):
+        assignment, shift_assignment, cluster_notes, load, results, iteration_log = assign_and_verify(
+            jobs, shifts, fleet
+        )
 
-if st.button("Generate Dynamic Schedule"):
-    if not api_key_input:
-        st.error("Please enter your Gemini API Key in the sidebar.")
+    with st.expander("🔁 How the engine got here (repair attempts)"):
+        for line in iteration_log:
+            st.write("- " + line)
+
+    any_fail = any(r["fail"] for r in results.values())
+    if any_fail:
+        st.error(
+            "⚠️ One or more drivers have a real conflict - see the red rows below. "
+            "Consider moving that job to a backup driver."
+        )
     else:
-        with st.spinner("Enforcing strict meal delivery pre-break timelines, capacities, and routing..."):
-            try:
-                schedule_output = generate_dynamic_schedule(api_key_input, shift_selection)
-                st.success("Schedule Generated Successfully!")
-                st.markdown(schedule_output)
-            except Exception as e:
-                st.error(f"System Error: {e}")
+        st.success(
+            "✅ Verified feasible - every driver's evening was simulated with real "
+            "travel times and nothing is late past the hard cutoff."
+        )
+
+    st.subheader("🍽️ Meal / Dinner Delivery Assignments")
+    dinner_rows = []
+    for j in jobs:
+        a = assignment.get(j["site_label"])
+        if a and a["dinner"]:
+            dinner_rows.append(
+                {"Site": j["site_label"], "Driver": a["dinner"], "Workers to feed": j["workers"]}
+            )
+    st.table(pd.DataFrame(dinner_rows))
+
+    st.subheader("🧩 How the dinner clusters were built (route-time checked)")
+    for note in cluster_notes:
+        st.write("- " + note)
+
+    st.subheader("🚚 Full Dispatch Schedule (by driver)")
+    for driver, res in results.items():
+        icon = "🔴" if res["fail"] else "🟢"
+        with st.expander(f"{icon} {driver} - {'CONFLICT' if res['fail'] else 'OK'}"):
+            df = pd.DataFrame(res["log"], columns=["Task", "Timing", "OK"])
+            st.table(df)
+
+    if shift_assignment:
+        st.subheader("🔄 Shifting Workers")
+        st.table(pd.DataFrame(shift_assignment))
+
+    st.caption(
+        "All times above are computed from real GPS coordinates in Site_Database "
+        f"(haversine distance x2 + 10min base + {EVENING_BUFFER_MIN}min evening buffer), "
+        "not generated or guessed by an AI model."
+    )
