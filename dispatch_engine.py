@@ -516,15 +516,16 @@ def verify_schedule(
                         log.append((f"Shift {t['label']}", "site not found", False))
                         fail = True
                         continue
-                    # leave HQ so arrive ~deadline
-                    d1 = travel_from_hq(fi, evening=True)
-                    leave = t["deadline"] - (d1 or 40) - 10
+                    # leave HQ early enough for from→to by 7PM (shifts often start ~5:30)
+                    d1 = travel_from_hq(fi, evening=True) or 40
+                    d2 = travel_min(
+                        haversine_km(fi["lat"], fi["lon"], ti["lat"], ti["lon"]),
+                        evening=True,
+                    ) or 30
+                    leave = t["deadline"] - d1 - d2 - 15
                     if leave < 17 * 60:
                         leave = 17 * 60
-                    clock = leave + (d1 or 40)
-                    d2 = haversine_km(fi["lat"], fi["lon"], ti["lat"], ti["lon"])
-                    clock += travel_min(d2) or 0
-                    arrival = clock
+                    arrival = leave + d1 + d2
                     ok = arrival <= t["hard"]
                     if not ok:
                         fail = True
@@ -956,16 +957,27 @@ def assign_drivers(
             load[d["name"]] += j["workers"]
             task_count[d["name"]] += 1
 
-    # ---- Shifts: prefer OT with light load (e.g. Pandi), one shift per driver when possible ----
+    # ---- Shifts (must finish before 7PM) ----
+    # Real ops: OT free in early evening (no food run) should do shifts, e.g. Pandi at 5:30.
+    # Staff only if no OT can finish by 7PM. Prefer one shift per driver when possible.
     shift_drivers_used: Set[str] = set()
+    # Who already has a food run? They leave ~5PM for food — less ideal for shifts
+    has_food = set()
+    for j in jobs:
+        if j.get("is_dinner"):
+            a = assignment.get(j["site_label"]) or {}
+            if a.get("dinner"):
+                has_food.add(a["dinner"])
+
     for s in shifts:
         avoided = avoid_for_job.get(f"SHIFT:{s['from']}", set())
         placed = False
-        # OT first (maximise OT / keep staff for pure pickups), lightest load, prefer unused for shifts
         for pool in (ot_list, staff_list):
             cands = [d for d in pool if d["name"] not in avoided]
+            # Prefer: no food run, not already on a shift, fewer tasks, lighter load
             cands.sort(
                 key=lambda d: (
+                    0 if d["name"] not in has_food else 1,
                     0 if d["name"] not in shift_drivers_used else 1,
                     task_count[d["name"]],
                     load[d["name"]],
@@ -991,7 +1003,9 @@ def assign_drivers(
             if placed:
                 break
         if not placed and (ot_list or staff_list):
-            d = (ot_list + staff_list)[0]
+            # last resort: OT without food, else any
+            fallback = [d for d in ot_list if d["name"] not in has_food] or ot_list or staff_list
+            d = fallback[0]
             shift_assignment.append(
                 {"from": s["from"], "to": s["to"], "driver": d["name"]}
             )
