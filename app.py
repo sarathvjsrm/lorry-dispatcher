@@ -8,7 +8,8 @@ from dispatch_engine import (
     parse_site_database,
     parse_fleet,
     parse_daily_ops,
-    assign_and_verify,
+    build_schedule,
+    driver_timeline_rows,
     EVENING_BUFFER_MIN,
     DINNER_END_THRESHOLD,
     fmt_time,
@@ -17,9 +18,9 @@ from dispatch_engine import (
 st.set_page_config(page_title="Anderco Lorry Dispatcher", page_icon="🚚", layout="wide")
 st.title("🚚 Anderco Dynamic Lorry Dispatcher")
 st.caption(
-    "Location-first · OT drivers first · Food only for ≥22:00 sites · "
-    "Pickup at end-time + 2 min (board ~2 min) · Traffic buffer only. "
-    "All times from GPS + Site_Database travel records."
+    "OT first · food only for ≥22:00 sites, delivered by 6:30 PM · pickups are "
+    "just-in-time (never sent early to wait at a site) · HQ shown on every leg · "
+    "location-first clustering on EVERY wave, not just dinner."
 )
 
 SPREADSHEET_ID = config["spreadsheet_id"]
@@ -51,6 +52,17 @@ def load_google_sheet_data():
             raise e
 
 
+top_l, top_r = st.columns([5, 1])
+with top_r:
+    if st.button("🔄 Refresh data"):
+        st.cache_data.clear()
+        st.rerun()
+st.caption(
+    "Sheet data is cached for up to 2 minutes for speed. If you just edited "
+    "Fleet_Drivers or Daily_Ops (e.g. removed someone on leave), hit **Refresh data** "
+    "before generating tonight's dispatch so you're not looking at a stale sheet."
+)
+
 try:
     daily_ops_raw, site_raw, driver_raw = load_google_sheet_data()
     site_lookup = parse_site_database(site_raw)
@@ -61,10 +73,14 @@ except Exception as e:
     st.stop()
 
 with st.sidebar:
-    st.header("Fleet (OT first)")
+    st.header("Fleet tonight (OT first)")
     df_fleet = pd.DataFrame(fleet)[["name", "vehicle", "type", "cap", "is_ot"]]
     st.dataframe(df_fleet, hide_index=True)
-    st.caption("Names on Fleet_Drivers sheet = OT. Staff Driver N only if needed. Remove a name = on leave.")
+    st.caption(
+        "Every name on Fleet_Drivers = OT tonight. Remove a name (leave) and they "
+        "disappear from every list immediately after Refresh data. Staff Driver "
+        "N are backups only, used when OT truly can't cover a job."
+    )
 
 unresolved = [j["site_label"] for j in jobs if not j["info"]]
 if unresolved:
@@ -79,7 +95,6 @@ st.write(
     f"**{dinner_count} need food** (≥22:00) · {len(shifts)} shift(s)"
 )
 
-# Preview table
 preview = []
 for j in jobs:
     end = fmt_time(j["end_min"]) if j["end_min"] is not None else "?"
@@ -89,36 +104,21 @@ for j in jobs:
             "End": end,
             "Workers": j["workers"],
             "Food?": "YES" if j["is_dinner"] else "—",
-            "Pickup window": (
-                f"{fmt_time(j['end_min'] + 10)}" if j["end_min"] is not None else "?"
-            ),
             "Coords": "OK" if j["info"] and j["info"].get("lat") else "MISSING",
         }
     )
 st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
 
 if st.button("🚀 Generate Dispatch", type="primary"):
-    with st.spinner("Clustering by location · OT-first assign · verifying timelines..."):
-        (
-            assignment,
-            shift_assignment,
-            cluster_notes,
-            load,
-            results,
-            iteration_log,
-        ) = assign_and_verify(jobs, shifts, fleet)
+    with st.spinner("Clustering every wave by location · OT-first, just-in-time timing..."):
+        assignment, shift_assignment, notes, states = build_schedule(jobs, shifts, fleet)
 
-    with st.expander("Repair attempts"):
-        for line in iteration_log:
-            st.write("- " + line)
-
-    any_fail = any(r["fail"] for r in results.values())
-    if any_fail:
-        st.error("Some drivers still have conflicts — see red expanders.")
+    problems = [n for n in notes if n.startswith("[!]") or n.startswith("⚠️")]
+    if problems:
+        st.error(f"{len(problems)} item(s) need your attention tonight — see below.")
     else:
-        st.success("All drivers feasible under traffic buffer + pickup windows.")
+        st.success("Every site has a driver, on time, within tolerance.")
 
-    # Assignment summary for Daily_Ops paste-back
     st.subheader("📋 Assignment (paste into Daily_Ops Dinner / Pickup columns)")
     rows = []
     for j in jobs:
@@ -134,35 +134,42 @@ if st.button("🚀 Generate Dispatch", type="primary"):
         )
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-    st.subheader("🍽️ Food clusters (22:00+ only)")
-    if cluster_notes:
-        for note in cluster_notes:
-            st.write("- " + note)
-    else:
-        st.write("No 22:00+ sites tonight — no food runs.")
-
-    st.subheader("🚚 Driver timelines")
-    st.caption(
-        "Pickup: driver may arrive early and **wait** until site end time "
-        "(workers still working / board ~2 min). Food must hit 6:30 PM."
-    )
-    # OT first in display
-    ot_names = [d["name"] for d in fleet if d.get("is_ot")]
-    ordered_drivers = [n for n in ot_names if n in results] + [
-        n for n in results if n not in ot_names
-    ]
-    for driver in ordered_drivers:
-        res = results[driver]
-        icon = "🔴" if res["fail"] else "🟢"
-        tag = "OT" if driver in ot_names else "STAFF"
-        with st.expander(f"{icon} [{tag}] {driver} — {'CONFLICT' if res['fail'] else 'OK'}"):
-            df = pd.DataFrame(res["log"], columns=["Task", "Timing", "OK"])
-            st.table(df)
-
     if shift_assignment:
         st.subheader("🔄 Shifting workers")
         st.table(pd.DataFrame(shift_assignment))
 
+    st.subheader("🚚 Driver timelines")
     st.caption(
-        f"Travel = Site_Database real minutes (or km×2+10) + {EVENING_BUFFER_MIN} min traffic buffer."
+        "Just-in-time: a driver leaves HQ at the latest moment that still makes "
+        "the pickup on time. Idle time shows as 'Rest at HQ', never as waiting at a site."
+    )
+    ot_names = [d["name"] for d in fleet if d.get("is_ot")]
+    ordered_drivers = [n for n in ot_names if n in states] + [
+        n for n in states if n not in ot_names
+    ]
+    for driver in ordered_drivers:
+        st_ = states[driver]
+        if not st_.engagements:
+            continue
+        tag = "OT" if st_.is_ot else "STAFF"
+        icon = "🟢"
+        for leg in st_.engagements:
+            if leg.get("max_lateness", 0) > 0 or not leg.get("feasible", True):
+                icon = "🟡"
+        with st.expander(f"{icon} [{tag}] {driver} — {st_.jobs_count} job(s), {st_.pax_count} pax"):
+            df = pd.DataFrame(driver_timeline_rows(st_), columns=["Task", "Timing"])
+            st.table(df)
+
+    idle_ot = [d["name"] for d in fleet if d.get("is_ot") and not states[d["name"]].engagements]
+    if idle_ot:
+        st.warning(f"Idle OT tonight (no feasible slot found for them): {', '.join(idle_ot)}")
+
+    st.subheader("🗒️ Full planning log")
+    with st.expander("Show every clustering / assignment decision made tonight"):
+        for note in notes:
+            st.write("- " + note)
+
+    st.caption(
+        f"Travel = Site_Database real HQ minutes (or km×2+10) + {EVENING_BUFFER_MIN} min "
+        "traffic buffer on HQ legs; lighter estimate for short site-to-site hops within a cluster."
     )

@@ -1,33 +1,69 @@
 # Anderco Dynamic Lorry Dispatcher
 
-Deterministic evening dispatch for Anderco lorries.
+Deterministic evening dispatch for Anderco lorries — rewritten as a
+**wave-based, just-in-time** engine. See the top of `dispatch_engine.py`
+for the full design note; short version below.
+
+## How it thinks
+
+Every night's jobs are grouped into "waves" by shift-end time (7:00 PM,
+9:00 PM, 10:00 PM, ...). Within a wave, jobs that are geographically close
+become **one cluster and ride one lorry** — clustering runs on *every*
+wave now, not just the 22:00 dinner sites. Every driver's evening is a
+chronological chain:
+
+```
+[Food run] -> HQ -> rest -> [7PM wave] -> HQ -> rest -> [9PM wave] -> HQ -> ...
+```
+
+Two rules drive every timing decision:
+
+1. **Pickups are just-in-time.** A driver leaves HQ at the *latest* moment
+   that still lands them at the site ~2 min after the shift ends. We never
+   send a driver out early to sit and wait at a site — if there's slack,
+   they wait at HQ, where the next job can also be picked up. (This is the
+   opposite of the old engine, which would send a driver out early and let
+   them idle at the site for up to an hour.)
+2. **No site-to-site jumps across waves.** A driver must pass through HQ
+   between two different end-time waves (drop workers, minimum handover
+   rest) before leaving for the next one. The only same-trip exception is
+   multiple sites *inside the same cluster* (same end time, nearby).
 
 ## Business rules (built into the engine)
 
-1. **Pickup = end time + 10 minutes**  
-   Workers finish work, scan Infotech, then board. Drivers must not pick up at 5–6 PM for a 9–10 PM site. If the lorry arrives early, it **waits** at the site until end time.
-
-2. **Food only for sites ending at or after 22:00**  
-   Food must arrive by **18:30** (hard cutoff 19:00). Sites ending 19:00 or 21:00 do **not** get a food run.
-
-3. **Location first**  
-   Nearby 22:00 sites are clustered on one lorry when workers fit (≤25) and the food route is driveable.
-
-4. **OT drivers first**  
-   Order: **Mahendran → Sridhar → Kailing → Senthil → Pandi**.  
-   Staff drivers only when OT cannot cover. Named **Staff Driver 1, 2, …**
-
-5. **OT work continuously**  
-   Only traffic buffer (+15 min) is added to travel times.
-
-6. **Return to HQ** after a pickup before the next distant job. Nearby same-band pickups can be chained.
+1. **Food only for sites ending at or after 22:00**, delivered by **18:30**
+   target (hard cutoff 19:00). Sites ending 19:00 or 21:00 never get food.
+2. **OT drivers first.** Every name on the `Fleet_Drivers` sheet is OT
+   tonight — remove a name (leave) and they're gone from every list as
+   soon as you hit **Refresh data**. No code change needed, and no more
+   "driver removed from the sheet but still shows up" — that was a caching
+   issue, fixed by the explicit refresh button.
+3. **Staff only when OT truly can't cover** a job — timing-infeasible or
+   over capacity. Staff never get a food run and never wait around; each
+   staff trip is an independent, just-in-time HQ → site(s) → HQ sortie.
+4. **Location first**, on every wave: nearby jobs share one lorry whenever
+   capacity (≤25 pax, the 14ft cap) and timing allow. Clustering is decided
+   by the *real* deadline math for that job type, not an arbitrary "route
+   budget" constant — so it automatically adapts to how far a site is from
+   HQ instead of silently under-clustering anything far out.
+5. **Shifts (site-to-site, before 7 PM)** prefer a single free OT (no food
+   run) to chain all of them if feasible; otherwise split across free OT,
+   then busy OT, then staff.
+6. **Balance OT** — every assignment step picks the driver with the fewest
+   jobs/pax so far, so nobody gets a long night while another OT sits idle.
+7. **Capacity** — 14ft ≈ 25 pax, 10ft ≈ 14 pax, enforced everywhere.
+8. **Best-effort, never silent.** If every driver is genuinely already
+   committed elsewhere, the engine widens the lateness tolerance in steps
+   rather than dropping the job outright — and flags it loudly (⚠️) in the
+   planning log so you can see exactly which nights the fleet is short a
+   lorry, instead of the job just vanishing off the plan.
 
 ## You do not need Python on your PC
 
 ### Option A — GitHub Codespaces (browser)
 
-1. Open the repo on GitHub  
-2. Code → Codespaces → Create codespace  
+1. Open the repo on GitHub
+2. Code → Codespaces → Create codespace
 3. In the terminal:
    ```bash
    pip install -r requirements.txt
@@ -37,8 +73,8 @@ Deterministic evening dispatch for Anderco lorries.
 
 ### Option B — Streamlit Community Cloud
 
-1. Push this repo to GitHub  
-2. Deploy at share.streamlit.io with `app.py`  
+1. Push this repo to GitHub
+2. Deploy at share.streamlit.io with `app.py`
 3. Add secrets under Settings → Secrets
 
 ### Streamlit secrets (GCP service account)
@@ -56,12 +92,16 @@ token_uri = "https://oauth2.googleapis.com/token"
 
 Share the Google Sheet with `client_email` as Editor.
 
-## Daily workflow
+## Daily workflow (the only thing you touch nightly)
 
-1. Daily_Ops: enter Site / End Time / Workers (shifts if any)  
-2. Open dispatcher → Generate Dispatch  
-3. Copy Dinner / Pickup drivers into Daily_Ops if needed  
-4. Read timelines: food by 6:30, pickups at end+10
+1. `Fleet_Drivers`: who's on duty tonight (add/remove names for leave).
+2. `Daily_Ops`: Site / End Time / Workers, and any site-to-site shifts.
+3. Open the dispatcher → **Refresh data** (if you just edited the sheet)
+   → **Generate Dispatch**.
+4. Copy Dinner / Pickup drivers back into `Daily_Ops` if you paper-track it.
+5. Check the planning log expander for any ⚠️ / `[!]` lines — those are
+   the nights the fleet is genuinely short a lorry for the geography you
+   were given, not a bug to chase.
 
 ## Config (`config.json`)
 
@@ -73,3 +113,8 @@ Share the Google Sheet with `client_email` as Editor.
   "hq_lon": 103.6345739
 }
 ```
+
+Everything else (evening start time, food target/cutoff, pickup lateness
+tolerance, minimum HQ rest between waves) is a named constant near the top
+of `dispatch_engine.py` — change a constant there if a rule genuinely
+needs retuning; you should not need to touch the algorithm itself.
