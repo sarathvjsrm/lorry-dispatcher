@@ -1,41 +1,53 @@
 """
-dispatch_engine.py — Anderco evening lorry dispatch (deterministic, wave-based).
+dispatch_engine.py — Anderco evening lorry dispatch (general brain, any night).
 
 ============================================================================
-HOW THIS THINKS (read this before touching the constants below)
+PERMANENT RULES (no daily code edits — only Daily_Ops + Fleet_Drivers change)
 ============================================================================
-Every night's jobs are grouped into "waves" by shift-end time (e.g. 7:00 PM,
-9:00 PM, 10:00 PM). Within a wave, jobs that are geographically close become
-ONE cluster and ride ONE lorry (location-first). Every driver's evening is
-built as a chronological chain of engagements:
 
-    [Food run] -> HQ -> rest -> [7PM wave] -> HQ -> rest -> [9PM wave] -> HQ ...
+1. WAVES BY END TIME
+   Jobs with the SAME shift-end time = one wave.
+   Different end times = different waves. Never chain 7pm→9pm→10pm without HQ.
 
-Two hard rules drive every timing decision:
-  1. PICKUPS ARE JUST-IN-TIME. A driver departs HQ at the LATEST moment that
-     still lands them at the pickup site ~2 min after the shift ends. We never
-     send a driver out early to sit and wait at a site -- if there's slack, the
-     driver waits at HQ instead, where the next job can also be picked up.
-  2. NO SITE-TO-SITE JUMPS ACROSS WAVES. A driver must pass through HQ between
-     two different end-time waves (drop workers, minimum handover rest) before
-     leaving for the next wave. The ONLY same-trip exception is multiple sites
-     inside the SAME cluster (same end time, nearby) -- those are one lorry run.
+2. CLUSTER WITHIN A WAVE (location-first)
+   Same end time + capacity fits + real travel still on time → ONE lorry.
+   Nearby hops use light travel (ops ~10–15 min), not the full HQ formula.
+   Feasibility = real deadline math, not a fixed "route budget" constant.
 
-Everything else (OT-first, food only for >=22:00, capacity, OT balancing,
-staff-only-as-last-resort) is built on top of that timing skeleton.
+3. HQ RETURN — ONLY WHEN WORKERS MUST BE DROPPED
+   After PICKUP  → always HQ (workers).
+   After FOOD   → no HQ (nothing to drop).
+   After SHIFT  → no HQ (already dropped at destination school).
 
-============================================================================
-DAILY UPDATE SURFACE (the only two sheets you touch nightly)
-============================================================================
-  - Fleet_Drivers: who is on duty tonight. Every name on this sheet = an OT
-    driver. Remove a name (e.g. someone on leave) and they vanish everywhere,
-    immediately (no code change, no stale caching once you hit "Refresh data").
-  - Daily_Ops: tonight's sites / end times / worker counts, and any
-    site-to-site shift transfers.
+4. OT FIRST, ALWAYS
+   Every name on Fleet_Drivers = OT tonight (remove = leave, gone).
+   Staff only after every OT was tried (including wider lateness).
+   Staff = independent JIT trips only; no continuous evening required.
 
-Everything below this line is the "one-time brain" -- business logic that
-should NOT need nightly edits. If a rule needs to change, change a constant
-in the CONFIG block, not the algorithm.
+5. MAXIMISE OT / SPREAD 10PM
+   Wave order: food → shifts → 7pm wave(s) → 10pm wave (prefer one site
+   per OT who does not yet have 10pm) → 9pm wave.
+   Why 10 before 9: a 9pm return ~9:45 misses the 10pm leave window.
+
+6. SHIFTS
+   Prefer ONE free OT (no food) to chain ALL shifts when timing allows.
+   Chain without HQ between (workers already at destination).
+   Soft deadline on 2nd+ hop in a chain.
+
+7. JUST-IN-TIME PICKUPS
+   Leave so first stop is ~end+2 min. Idle = wait at HQ or between jobs,
+   never sit early at site. Board ~2 min.
+
+8. FOOD
+   Only sites ending >= 22:00. Target 18:30, hard 19:00. OT only.
+
+9. BALANCE
+   Always assign next job to lightest OT (fewest jobs, then fewest pax).
+
+10. NEVER SILENT FAIL
+    If short a lorry, widen lateness and flag ⚠️ / [!] in the log.
+
+Touch only: Fleet_Drivers, Daily_Ops, config.json traffic buffer.
 """
 
 from __future__ import annotations
@@ -65,7 +77,7 @@ FOOD_TARGET_MIN = 18 * 60 + 30        # 6:30 PM target delivery
 FOOD_HARD_MIN = 19 * 60               # 7:00 PM hard cutoff
 
 PICKUP_BOARD_MIN = 2                  # workers board ~2 min after shift end (scan out)
-PICKUP_LATE_TOLERANCE = 15            # a 2nd/3rd stop in a cluster may run up to this late
+PICKUP_LATE_TOLERANCE = 25            # 2nd/3rd stop in same-wave cluster; nearby hops ~15 min
 STOP_DWELL_MIN = 2                    # minutes spent boarding workers at each stop
 
 MIN_HQ_REST_MIN = 10                  # minimum handover/rest at HQ between two waves for one driver
@@ -183,19 +195,14 @@ def travel_hq_to(info: dict) -> int:
 
 
 def travel_between(a: dict, b: dict) -> int:
-    """Site-to-site hop within a cluster (already in the area -- no recorded
-    data source, haversine only). This is deliberately a LIGHTER estimate
-    than travel_km_min/travel_hq_to: the flat +10 base and full 15-min
-    traffic buffer in the HQ formula model getting a lorry out of HQ onto
-    the highway, not a short local hop between two nearby sites you're
-    already driving between. Using the HQ formula here would make a 1km
-    hop between neighbouring sites look like 25+ minutes and silently
-    block clustering that should obviously happen."""
+    """Site-to-site hop within a same-end-time cluster.
+    User ops: nearby west sites (J105/J106/J115A/ITTC/YAK/WUXI) ~15 min apart.
+    Keep estimate light so clustering does not silently refuse good merges."""
     d = haversine_km(a.get("lat"), a.get("lon"), b.get("lat"), b.get("lon"))
     if d is None:
-        return 20
-    local_buffer = max(3, int(round(EVENING_BUFFER_MIN * 0.3)))  # light local traffic allowance
-    return int(round(d * 3.0)) + 3 + local_buffer
+        return 15
+    # ~2 min/km + small buffer; floor 8, typical nearby 12–18
+    return max(8, int(round(d * 2.2)) + 5)
 
 
 # ---------------------------------------------------------------------------
@@ -670,28 +677,43 @@ def assign_pickup_wave(
                 staff_states, key=lambda s: s.balance_key()
             )
         placed = False
-        for st in candidates:
-            if st.cap < pax:
-                continue
-            leg = try_leg(st, cl)
-            if not leg["feasible"]:
-                continue
-            st.commit(leg, workers=pax)
-            if end_min >= 22 * 60:
-                st.did_10pm = True
-            for stop in leg["stops"]:
-                site_label = next(j["site_label"] for j in cl["jobs"] if j["info"] is stop["site"])
-                assignment[site_label] = {"pickup": st.name}
-            tag = "OT" if st.is_ot else "STAFF"
-            names = ", ".join(j["site_label"] for j in cl["jobs"])
-            notes.append(
-                f"[{fmt_time(end_min)} wave] [{tag}] {st.name} -> {names} "
-                f"({pax} pax) -- leave {fmt_time(leg['depart_hq'])}, "
-                f"back HQ {fmt_time(leg['hq_return'])}"
-                + (f", up to {leg['max_lateness']}min late on later stop" if leg["max_lateness"] > 0 else "")
-            )
-            placed = True
-            break
+        # Pass 1: OT only (normal tolerance). Pass 2: OT with wider tolerance. Pass 3: staff.
+        ot_only = [st for st in candidates if st.is_ot]
+        staff_only = [st for st in candidates if not st.is_ot]
+        for pool, tol in (
+            (ot_only, PICKUP_LATE_TOLERANCE),
+            (ot_only, PICKUP_LATE_TOLERANCE + 15),
+            (staff_only, PICKUP_LATE_TOLERANCE),
+        ):
+            if placed:
+                break
+            for st in pool:
+                if st.cap < pax:
+                    continue
+                leg = time_pickup_cluster(
+                    cl, end_min, st.earliest_depart(), tolerance=tol,
+                    from_lat=None if st.at_hq else st.free_lat,
+                    from_lon=None if st.at_hq else st.free_lon,
+                    at_hq=st.at_hq,
+                )
+                if not leg["feasible"]:
+                    continue
+                st.commit(leg, workers=pax)
+                if end_min >= 22 * 60:
+                    st.did_10pm = True
+                for stop in leg["stops"]:
+                    site_label = next(j["site_label"] for j in cl["jobs"] if j["info"] is stop["site"])
+                    assignment[site_label] = {"pickup": st.name}
+                tag = "OT" if st.is_ot else "STAFF"
+                names = ", ".join(j["site_label"] for j in cl["jobs"])
+                notes.append(
+                    f"[{fmt_time(end_min)} wave] [{tag}] {st.name} -> {names} "
+                    f"({pax} pax) -- leave {fmt_time(leg['depart_hq'])}, "
+                    f"back HQ {fmt_time(leg['hq_return'])}"
+                    + (f", up to {leg['max_lateness']}min late on later stop" if leg["max_lateness"] > 0 else "")
+                )
+                placed = True
+                break
         if not placed:
             if len(cl["jobs"]) > 1:
                 notes.append(f"[i] Splitting {pax}-pax cluster ({fmt_time(end_min)})")
