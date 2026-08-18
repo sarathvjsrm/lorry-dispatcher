@@ -597,84 +597,122 @@ def assign_food(dinner_jobs: List[dict], states: Dict[str, DriverState], notes: 
     return out
 
 
+
+def time_multi_shift(
+    from_list: List[dict],
+    to_info: dict,
+    to_label: str,
+    earliest: int,
+) -> dict:
+    """One continuous shift: pick several FROM schools, drop all at one TO.
+    Must finish drop before SHIFT_HARD_CUTOFF. Leave as early as EVENING_START.
+    Driver free at TO after drop (no HQ)."""
+    # Order: farthest from destination first, end with closest to TO (efficient path)
+    ordered = sorted(
+        from_list,
+        key=lambda fi: -(haversine_km(fi.get("lat"), fi.get("lon"), to_info.get("lat"), to_info.get("lon")) or 0),
+    )
+    depart = max(earliest, EVENING_START)
+    t = depart
+    prev = None
+    stops = []
+    for i, fi in enumerate(ordered):
+        leg = travel_hq_to(fi) if prev is None else travel_between(prev, fi)
+        arrive = t + leg
+        stops.append({"site": fi, "arrive": arrive, "kind": "pick"})
+        t = arrive + STOP_DWELL_MIN
+        prev = fi
+    # final leg to destination
+    leg = travel_between(prev, to_info)
+    arrive_to = t + leg
+    stops.append({"site": to_info, "arrive": arrive_to, "kind": "drop"})
+    return {
+        "type": "shift_multi",
+        "from_labels": [f.get("label") or "" for f in ordered],
+        "to": to_label,
+        "to_info": to_info,
+        "depart": depart,
+        "stops": stops,
+        "arrive_to": arrive_to,
+        "feasible": arrive_to <= SHIFT_HARD_CUTOFF,
+        "free_at": arrive_to + STOP_DWELL_MIN,
+        "free_lat": to_info.get("lat") or HQ_LAT,
+        "free_lon": to_info.get("lon") or HQ_LON,
+        "at_hq": False,
+    }
+
+
 def assign_shifts(shifts: List[dict], states: Dict[str, DriverState], notes: List[str]) -> List[dict]:
+    """Group shifts by destination. Same TO → one multi-pickup run when possible.
+    Finish before 7pm, leave from 5pm. Driver free at TO — can take nearby 7pm next."""
     if not shifts:
         return []
+
+    # Group by to-label
+    by_to: Dict[str, List[dict]] = {}
+    for s in shifts:
+        by_to.setdefault(s["to"], []).append(s)
+
     ot, staff = _ot_staff(list(states.values()))
     free_ot = sorted([s for s in ot if not s.did_food], key=lambda s: s.balance_key())
     busy_ot = sorted([s for s in ot if s.did_food], key=lambda s: s.balance_key())
     result = []
-    remaining = list(shifts)
 
-    def ordered(items):
-        if len(items) <= 1:
-            return list(items)
-        first = max(items, key=lambda s: travel_hq_to(s["from_info"]))
-        left = [s for s in items if s is not first]
-        out = [first]
-        cur = first["to_info"]
-        while left:
-            nxt = min(
-                left,
-                key=lambda s: haversine_km(
-                    cur.get("lat"), cur.get("lon"),
-                    s["from_info"].get("lat"), s["from_info"].get("lon"),
-                ) or 99,
-            )
-            out.append(nxt)
-            left.remove(nxt)
-            cur = nxt["to_info"]
-        return out
+    groups = list(by_to.items())
+    # larger groups first
+    groups.sort(key=lambda kv: -len(kv[1]))
 
-    def try_chain(st, items):
-        trials = []
-        floor = st.earliest()
-        at_hq = st.at_hq
-        flat, flon = st.free_lat, st.free_lon
-        for i, s in enumerate(items):
-            leg = time_shift(s, floor, at_hq=at_hq, free_lat=flat, free_lon=flon, chain=(i > 0))
-            if not leg["feasible"]:
-                return None
-            trials.append(leg)
-            floor = leg["free_at"]
-            at_hq = False
-            flat, flon = leg["free_lat"], leg["free_lon"]
-        return trials
-
-    for st in free_ot:
-        ord_items = ordered(remaining)
-        trials = try_chain(st, ord_items)
-        if trials:
-            for s, leg in zip(ord_items, trials):
-                st.commit(leg)
-                result.append({"from": s["from"], "to": s["to"], "driver": st.name})
-                notes.append(
-                    f"[SHIFT] {s['from']} → {s['to']} → {st.name} "
-                    f"(leave {fmt_time(leg['depart'])}, drop {fmt_time(leg['arrive_to'])}, no HQ after)"
-                )
-            remaining = []
-            break
-
-    for s in remaining:
+    remaining_groups = []
+    for to_label, group in groups:
+        to_info = group[0]["to_info"]
+        from_infos = [g["from_info"] for g in group]
+        from_labels = [g["from"] for g in group]
         placed = False
-        for pool in (free_ot, busy_ot, staff):
-            for st in sorted(pool, key=lambda x: x.balance_key()):
-                leg = time_shift(s, st.earliest(), at_hq=st.at_hq, free_lat=st.free_lat, free_lon=st.free_lon)
+        for pool in (free_ot, busy_ot):
+            for st in pool:
+                leg = time_multi_shift(from_infos, to_info, to_label, st.earliest())
                 if not leg["feasible"]:
                     continue
                 st.commit(leg)
-                result.append({"from": s["from"], "to": s["to"], "driver": st.name})
-                tag = "OT" if st.is_ot else "STAFF"
+                for g in group:
+                    result.append({"from": g["from"], "to": g["to"], "driver": st.name})
                 notes.append(
-                    f"[SHIFT] [{tag}] {s['from']} → {s['to']} → {st.name} "
-                    f"(leave {fmt_time(leg['depart'])}, drop {fmt_time(leg['arrive_to'])}, no HQ after)"
+                    f"[SHIFT] {st.name}: pick {' + '.join(from_labels)} → drop {to_label} "
+                    f"(leave {fmt_time(leg['depart'])}, drop {fmt_time(leg['arrive_to'])}, "
+                    f"free at destination — can take nearby 7pm)"
                 )
                 placed = True
                 break
             if placed:
                 break
         if not placed:
-            notes.append(f"[!] NO DRIVER for shift {s['from']} → {s['to']}")
+            # fallback: one-by-one
+            remaining_groups.append((to_label, group))
+
+    for to_label, group in remaining_groups:
+        for g in group:
+            placed = False
+            for pool in (free_ot, busy_ot, staff):
+                for st in sorted(pool, key=lambda x: x.balance_key()):
+                    leg = time_shift(
+                        g, st.earliest(),
+                        at_hq=st.at_hq, free_lat=st.free_lat, free_lon=st.free_lon,
+                    )
+                    if not leg["feasible"]:
+                        continue
+                    st.commit(leg)
+                    result.append({"from": g["from"], "to": g["to"], "driver": st.name})
+                    tag = "OT" if st.is_ot else "STAFF"
+                    notes.append(
+                        f"[SHIFT] [{tag}] {g['from']} → {g['to']} → {st.name} "
+                        f"(leave {fmt_time(leg['depart'])}, drop {fmt_time(leg['arrive_to'])})"
+                    )
+                    placed = True
+                    break
+                if placed:
+                    break
+            if not placed:
+                notes.append(f"[!] NO DRIVER for shift {g['from']} → {g['to']}")
     return result
 
 
@@ -709,9 +747,25 @@ def assign_pickup_wave(
             ot_pool = sorted(ot, key=lambda s: s.balance_key())
         staff_pool = sorted(staff, key=lambda s: s.balance_key())
 
+        # Prefer OT already in the area (post-shift / post-food) before HQ OT / staff
+        def near_score(st):
+            if st.at_hq:
+                return 999
+            infos = [j["info"] for j in cl["jobs"] if j.get("info")]
+            if not infos:
+                return 999
+            return min(
+                (haversine_km(st.free_lat, st.free_lon, i.get("lat"), i.get("lon")) or 99)
+                for i in infos
+            )
+
+        ot_local = sorted([s for s in ot_pool if not s.at_hq], key=lambda s: (near_score(s), s.balance_key()))
+        ot_hq = sorted([s for s in ot_pool if s.at_hq], key=lambda s: s.balance_key())
+
         placed = False
         for pool, tol in (
-            (ot_pool, PICKUP_LATE_TOLERANCE),
+            (ot_local, PICKUP_LATE_TOLERANCE + 20),  # post-shift: allow a bit late from area
+            (ot_hq, PICKUP_LATE_TOLERANCE),
             (ot_pool, PICKUP_LATE_TOLERANCE + 15),
             (staff_pool, PICKUP_LATE_TOLERANCE),
         ):
@@ -928,6 +982,16 @@ def driver_timeline_rows(state: DriverState) -> List[Tuple[str, str]]:
                 f"Shift: {leg['from']} → {leg['to']}",
                 f"Leave {fmt_time(leg['depart'])} → pick {fmt_time(leg['arrive_from'])} → "
                 f"drop {fmt_time(leg['arrive_to'])} (no HQ after shift)",
+            ))
+        elif leg["type"] == "shift_multi":
+            picks = " → ".join(
+                f"{st['site'].get('label', '?')} {fmt_time(st['arrive'])}"
+                for st in leg["stops"] if st.get("kind") == "pick"
+            )
+            rows.append((
+                f"Shift multi: {' + '.join(leg.get('from_labels') or [])} → {leg['to']}",
+                f"Leave {fmt_time(leg['depart'])} → {picks} → drop {fmt_time(leg['arrive_to'])} "
+                f"(free at {leg['to']}, no HQ)",
             ))
         prev_free = leg["free_at"]
     return rows
