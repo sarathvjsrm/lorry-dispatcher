@@ -440,40 +440,62 @@ def _order_nearest_hq_first(stops: List[dict]) -> List[dict]:
     return sorted(stops, key=lambda s: travel_hq_to(s))
 
 
-def time_pickup_cluster(cluster: dict, end_min: int, earliest_depart: int, tolerance: int = PICKUP_LATE_TOLERANCE) -> dict:
-    """Just-in-time multi-stop pickup route. First (nearest-HQ) stop arrives right
-    at end_min+board; later stops may run a little late (tolerance), never early-wait.
-    `earliest_depart` = the earliest this driver can physically leave HQ (their own
-    availability floor); the route backs off from the deadline but never earlier
-    than this floor."""
+def time_pickup_cluster(
+    cluster: dict,
+    end_min: int,
+    earliest_depart: int,
+    tolerance: int = PICKUP_LATE_TOLERANCE,
+    from_lat=None,
+    from_lon=None,
+    at_hq: bool = True,
+) -> dict:
+    """Just-in-time multi-stop pickup. MUST end at HQ (workers to drop).
+    May start from HQ or from driver's current free location (e.g. after food)."""
     infos = [j["info"] for j in cluster["jobs"]]
     ordered = _order_nearest_hq_first(infos)
     deadline0 = end_min + PICKUP_BOARD_MIN
-    depart_hq = max(earliest_depart, deadline0 - travel_hq_to(ordered[0]))
+    first = ordered[0]
+
+    if at_hq or from_lat is None:
+        travel_first = travel_hq_to(first)
+        depart = max(earliest_depart, deadline0 - travel_first)
+        t = depart
+        start_label = depart
+    else:
+        # travel from current free position to first site
+        d = haversine_km(from_lat, from_lon, first.get("lat"), first.get("lon"))
+        travel_first = travel_km_min(d) if d is not None else travel_hq_to(first)
+        travel_first = travel_first or 40
+        # just-in-time from current location
+        depart = max(earliest_depart, deadline0 - travel_first)
+        t = depart
+        start_label = depart
 
     stops_out = []
-    t = depart_hq
     prev = None
     max_lateness = 0
     for i, s in enumerate(ordered):
-        leg = travel_hq_to(s) if prev is None else travel_between(prev, s)
+        if prev is None:
+            leg = travel_first
+        else:
+            leg = travel_between(prev, s)
         arrive = t + leg
-        this_deadline = deadline0
-        lateness = max(0, arrive - this_deadline)
+        lateness = max(0, arrive - deadline0)
         max_lateness = max(max_lateness, lateness)
-        stops_out.append({"site": s, "arrive": arrive, "deadline": this_deadline, "late_by": lateness})
+        stops_out.append({"site": s, "arrive": arrive, "deadline": deadline0, "late_by": lateness})
         t = arrive + STOP_DWELL_MIN
         prev = s
+    # ALWAYS return HQ after pickup — workers must be dropped
     hq_return = t + travel_hq_to(prev)
 
     return {
         "type": "pickup",
-        "depart_hq": depart_hq,
+        "depart_hq": start_label,
         "stops": stops_out,
         "hq_return": hq_return,
         "workers": cluster["workers"],
         "max_lateness": max_lateness,
-        "feasible": max_lateness <= tolerance and depart_hq >= earliest_depart,
+        "feasible": max_lateness <= tolerance and start_label >= earliest_depart - 1,
     }
 
 
@@ -493,6 +515,7 @@ def time_food_cluster(cluster: dict, earliest_depart: int) -> dict:
         stops_out.append({"site": s, "arrive": arrive})
         t = arrive + STOP_DWELL_MIN
         prev = s
+    # Optional HQ return for display only — driver is NOT required to go HQ after food
     hq_return = t + travel_hq_to(prev)
     last_arrival = stops_out[-1]["arrive"]
 
@@ -500,7 +523,7 @@ def time_food_cluster(cluster: dict, earliest_depart: int) -> dict:
         "type": "food",
         "depart_hq": depart_hq,
         "stops": stops_out,
-        "hq_return": hq_return,
+        "hq_return": hq_return,  # display only; commit() uses last stop time
         "workers": cluster["workers"],
         "last_arrival": last_arrival,
         "feasible": last_arrival <= FOOD_HARD_MIN,
@@ -508,18 +531,30 @@ def time_food_cluster(cluster: dict, earliest_depart: int) -> dict:
     }
 
 
-def time_shift(shift: dict, earliest_depart: int) -> dict:
-    """Site-to-site transfer, must land before SHIFT_HARD_CUTOFF."""
+def time_shift(shift: dict, earliest_depart: int, from_hq: bool = True, free_lat=None, free_lon=None) -> dict:
+    """Site-to-site transfer, must land before SHIFT_HARD_CUTOFF.
+    After drop at destination, driver is free there (no HQ required — workers already dropped)."""
     fi, ti = shift["from_info"], shift["to_info"]
-    depart_hq = max(earliest_depart, EVENING_START)
-    arrive_from = depart_hq + travel_hq_to(fi)
+    if from_hq or free_lat is None:
+        depart = max(earliest_depart, EVENING_START)
+        arrive_from = depart + travel_hq_to(fi)
+        depart_label = depart
+    else:
+        # leave from current free location
+        d = haversine_km(free_lat, free_lon, fi.get("lat"), fi.get("lon"))
+        leg = travel_km_min(d) if d is not None else travel_hq_to(fi)
+        depart = max(earliest_depart, EVENING_START)
+        arrive_from = depart + (leg or 40)
+        depart_label = depart
     depart_from = arrive_from + STOP_DWELL_MIN
     arrive_to = depart_from + travel_between(fi, ti)
+    # Optional HQ for display if they choose to return; not required
     hq_return = arrive_to + STOP_DWELL_MIN + travel_hq_to(ti)
     return {
         "type": "shift",
         "from": shift["from"], "to": shift["to"],
-        "depart_hq": depart_hq,
+        "from_info": fi, "to_info": ti,
+        "depart_hq": depart_label,
         "arrive_from": arrive_from,
         "arrive_to": arrive_to,
         "hq_return": hq_return,
@@ -537,24 +572,60 @@ class DriverState:
         self.name = d["name"]
         self.cap = d["cap"]
         self.is_ot = d.get("is_ot", False)
-        self.free_at = EVENING_START     # HQ availability floor (rest-adjusted)
-        self.engagements: List[dict] = []  # chronological legs
+        self.free_at = EVENING_START
+        self.free_lat = HQ_LAT
+        self.free_lon = HQ_LON
+        self.at_hq = True
+        self.engagements: List[dict] = []
         self.jobs_count = 0
         self.pax_count = 0
         self.did_food = False
+        self.did_10pm = False
 
     def earliest_depart(self) -> int:
+        """OT: no forced rest window — free as soon as last job ends.
+        Staff: same (they only do isolated trips anyway).
+        After a pickup (workers dropped at HQ) a short handover is OK."""
         if not self.engagements:
             return EVENING_START
-        return self.free_at + MIN_HQ_REST_MIN
+        last = self.engagements[-1]
+        if last.get("type") == "pickup" and last.get("hq_return") is not None:
+            return last["hq_return"] + MIN_HQ_REST_MIN
+        # food / shift: free immediately at free_at (no forced HQ rest)
+        return self.free_at
 
     def commit(self, leg: dict, workers: int = 0):
         self.engagements.append(leg)
-        self.free_at = leg["hq_return"]
         self.jobs_count += 1
         self.pax_count += workers
+        # Where is the driver free after this leg?
+        if leg["type"] == "pickup":
+            # MUST return HQ — workers to drop
+            self.free_at = leg["hq_return"]
+            self.free_lat, self.free_lon = HQ_LAT, HQ_LON
+            self.at_hq = True
+        elif leg["type"] == "food":
+            # No workers to drop at HQ — free at last delivery site
+            last = leg["stops"][-1]
+            self.free_at = last["arrive"] + STOP_DWELL_MIN
+            self.free_lat = last["site"].get("lat") or HQ_LAT
+            self.free_lon = last["site"].get("lon") or HQ_LON
+            self.at_hq = False
+            # optional: if leg still has hq_return for display, ignore for free_at
+        elif leg["type"] == "shift":
+            # Workers already dropped at destination school — free there
+            self.free_at = leg["arrive_to"] + STOP_DWELL_MIN
+            ti = leg.get("to_info") or {}
+            self.free_lat = ti.get("lat") or HQ_LAT
+            self.free_lon = ti.get("lon") or HQ_LON
+            self.at_hq = False
+        else:
+            self.free_at = leg.get("hq_return") or leg.get("free_at") or self.free_at
+            self.at_hq = True
+            self.free_lat, self.free_lon = HQ_LAT, HQ_LON
 
     def balance_key(self):
+        # Prefer drivers with fewer jobs, then fewer pax; OT who lack 10pm get slight priority via sort key used elsewhere
         return (self.jobs_count, self.pax_count)
 
 
@@ -563,7 +634,8 @@ def _ot_first_pool(states: List[DriverState]):
 
 
 def assign_pickup_wave(
-    jobs_this_wave: List[dict], end_min: int, states: Dict[str, DriverState], notes: List[str]
+    jobs_this_wave: List[dict], end_min: int, states: Dict[str, DriverState], notes: List[str],
+    prefer_spread_10pm: bool = False,
 ):
     def pickup_feasible(merged_jobs):
         trial = {"jobs": merged_jobs, "workers": sum(j["workers"] or 0 for j in merged_jobs)}
@@ -572,21 +644,39 @@ def assign_pickup_wave(
     clusters = cluster_same_endtime(jobs_this_wave, pickup_feasible)
     ot_states, staff_states = _ot_first_pool(list(states.values()))
 
-    assignment: Dict[str, dict] = {}  # site_label -> {"pickup": name}
+    assignment: Dict[str, dict] = {}
     unplaced: List[dict] = []
+
+    def try_leg(st, cl):
+        return time_pickup_cluster(
+            cl, end_min, st.earliest_depart(),
+            from_lat=None if st.at_hq else st.free_lat,
+            from_lon=None if st.at_hq else st.free_lon,
+            at_hq=st.at_hq,
+        )
 
     for cl in clusters:
         pax = cl["workers"]
-        candidates_ordered = sorted(ot_states, key=lambda s: s.balance_key()) + \
-            sorted(staff_states, key=lambda s: s.balance_key())
+        # OT first; for 10pm wave prefer OT who do NOT already have a 10pm job
+        if prefer_spread_10pm:
+            ot_fresh = sorted([s for s in ot_states if not s.did_10pm], key=lambda s: s.balance_key())
+            ot_busy = sorted([s for s in ot_states if s.did_10pm], key=lambda s: s.balance_key())
+            candidates = ot_fresh + ot_busy + sorted(staff_states, key=lambda s: s.balance_key())
+        else:
+            # 7/9pm: OT first (lightest), staff last — staff only when no OT can do it
+            candidates = sorted(ot_states, key=lambda s: s.balance_key()) + sorted(
+                staff_states, key=lambda s: s.balance_key()
+            )
         placed = False
-        for st in candidates_ordered:
+        for st in candidates:
             if st.cap < pax:
                 continue
-            leg = time_pickup_cluster(cl, end_min, st.earliest_depart())
+            leg = try_leg(st, cl)
             if not leg["feasible"]:
                 continue
             st.commit(leg, workers=pax)
+            if end_min >= 22 * 60:
+                st.did_10pm = True
             for stop in leg["stops"]:
                 site_label = next(j["site_label"] for j in cl["jobs"] if j["info"] is stop["site"])
                 assignment[site_label] = {"pickup": st.name}
@@ -594,30 +684,32 @@ def assign_pickup_wave(
             names = ", ".join(j["site_label"] for j in cl["jobs"])
             notes.append(
                 f"[{fmt_time(end_min)} wave] [{tag}] {st.name} -> {names} "
-                f"({pax} pax) -- leave HQ {fmt_time(leg['depart_hq'])}, "
-                f"back to HQ {fmt_time(leg['hq_return'])}"
+                f"({pax} pax) -- leave {fmt_time(leg['depart_hq'])}, "
+                f"back HQ {fmt_time(leg['hq_return'])}"
                 + (f", up to {leg['max_lateness']}min late on later stop" if leg["max_lateness"] > 0 else "")
             )
             placed = True
             break
         if not placed:
             if len(cl["jobs"]) > 1:
-                notes.append(f"[i] Splitting {pax}-pax cluster ({fmt_time(end_min)}) -- no single lorry could take it as one trip.")
+                notes.append(f"[i] Splitting {pax}-pax cluster ({fmt_time(end_min)})")
                 for j in cl["jobs"]:
                     sub = {"jobs": [j], "workers": j["workers"]}
                     sub_placed = False
-                    for st in sorted(ot_states, key=lambda s: s.balance_key()) + sorted(staff_states, key=lambda s: s.balance_key()):
-                        if st.cap < j["workers"]:
+                    for st in candidates:
+                        if st.cap < (j["workers"] or 0):
                             continue
-                        leg = time_pickup_cluster(sub, end_min, st.earliest_depart())
+                        leg = try_leg(st, sub)
                         if not leg["feasible"]:
                             continue
                         st.commit(leg, workers=j["workers"])
+                        if end_min >= 22 * 60:
+                            st.did_10pm = True
                         assignment[j["site_label"]] = {"pickup": st.name}
                         tag = "OT" if st.is_ot else "STAFF"
                         notes.append(
                             f"[{fmt_time(end_min)} wave] [{tag}] {st.name} -> {j['site_label']} "
-                            f"({j['workers']} pax) -- leave HQ {fmt_time(leg['depart_hq'])}, back {fmt_time(leg['hq_return'])}"
+                            f"({j['workers']} pax) -- leave {fmt_time(leg['depart_hq'])}, back HQ {fmt_time(leg['hq_return'])}"
                         )
                         sub_placed = True
                         break
@@ -638,25 +730,31 @@ def assign_pickup_wave(
         for tol in (PICKUP_LATE_TOLERANCE * 2, PICKUP_LATE_TOLERANCE * 3, PICKUP_LATE_TOLERANCE * 5):
             cands = sorted(ot_states, key=lambda s: s.balance_key()) + sorted(staff_states, key=lambda s: s.balance_key())
             for st in cands:
-                if st.cap < j["workers"]:
+                if st.cap < (j["workers"] or 0):
                     continue
-                leg = time_pickup_cluster(sub, end_min, st.earliest_depart(), tolerance=tol)
+                leg = time_pickup_cluster(
+                    sub, end_min, st.earliest_depart(), tolerance=tol,
+                    from_lat=None if st.at_hq else st.free_lat,
+                    from_lon=None if st.at_hq else st.free_lon,
+                    at_hq=st.at_hq,
+                )
                 if not leg["feasible"]:
                     continue
                 st.commit(leg, workers=j["workers"])
+                if end_min >= 22 * 60:
+                    st.did_10pm = True
                 assignment[j["site_label"]] = {"pickup": st.name}
                 tag = "OT" if st.is_ot else "STAFF"
                 notes.append(
                     f"⚠️ [{fmt_time(end_min)} wave] [{tag}] {st.name} -> {j['site_label']} "
-                    f"({j['workers']} pax) -- every driver was already committed; running "
-                    f"{leg['max_lateness']}min late, no alternative tonight. Leave HQ {fmt_time(leg['depart_hq'])}."
+                    f"({j['workers']} pax) -- running {leg['max_lateness']}min late. Leave {fmt_time(leg['depart_hq'])}."
                 )
                 placed = True
                 break
             if placed:
                 break
         if not placed:
-            notes.append(f"[!] NO DRIVER AT ALL for pickup {j['site_label']} ({j['workers']} pax, ends {fmt_time(end_min)}) -- fleet is short a lorry tonight.")
+            notes.append(f"[!] NO DRIVER AT ALL for pickup {j['site_label']} ({j['workers']} pax, ends {fmt_time(end_min)})")
 
     return assignment
 
@@ -779,17 +877,28 @@ def build_schedule(jobs: List[dict], shifts: List[dict], fleet: List[dict]):
 
     assignment: Dict[str, dict] = {j["site_label"]: {"dinner": None, "pickup": None} for j in jobs}
 
+    # 1) FOOD first (OT, no HQ return after — free at last site)
     dinner_jobs = [j for j in resolvable_jobs if j["is_dinner"]]
     food_result = assign_food_waves(dinner_jobs, states, notes)
     for label, a in food_result.items():
         assignment[label]["dinner"] = a["dinner"]
 
+    # 2) SHIFTS — free OT preferred; no HQ return after drop at destination
     shift_assignment = assign_shifts(shifts, states, notes)
 
+    # 3) Pickup waves: 7pm first, then 10pm (spread across OT), then 9pm.
+    #    Why 10 before 9: a 9pm run returns ~9:45 and misses the 10pm leave window.
+    #    OT who take 10pm skip 9pm; remaining OT take 9pm; staff fill gaps.
     waves = sorted({j["end_min"] for j in resolvable_jobs})
-    for end_min in waves:
+    early = [e for e in waves if e < 21 * 60]       # 7pm etc
+    late_10 = [e for e in waves if e >= 22 * 60]     # 10pm
+    mid_9 = [e for e in waves if 21 * 60 <= e < 22 * 60]  # 9pm
+    for end_min in early + late_10 + mid_9:
         wave_jobs = [j for j in resolvable_jobs if j["end_min"] == end_min]
-        pickup_result = assign_pickup_wave(wave_jobs, end_min, states, notes)
+        is_10 = end_min >= 22 * 60
+        pickup_result = assign_pickup_wave(
+            wave_jobs, end_min, states, notes, prefer_spread_10pm=is_10
+        )
         for label, a in pickup_result.items():
             assignment[label]["pickup"] = a["pickup"]
 
@@ -812,13 +921,14 @@ def driver_timeline_rows(state: DriverState) -> List[Tuple[str, str]]:
     rows = []
     prev_return = None
     for leg in state.engagements:
-        if prev_return is not None and leg["depart_hq"] > prev_return:
+        if prev_return is not None and leg.get("depart_hq") and leg["depart_hq"] > prev_return:
             rest = leg["depart_hq"] - prev_return
-            rows.append(("Rest at HQ", f"{fmt_time(prev_return)} -> {fmt_time(leg['depart_hq'])} ({rest} min)"))
+            if rest >= 5:
+                rows.append(("Available / move", f"{fmt_time(prev_return)} -> {fmt_time(leg['depart_hq'])} ({rest} min)"))
         if leg["type"] == "food":
             names = ", ".join(s["site"]["label"] for s in leg["stops"])
             arrivals = ", ".join(f"{s['site']['label']} {fmt_time(s['arrive'])}" for s in leg["stops"])
-            rows.append((f"Food run: {names}", f"Leave HQ {fmt_time(leg['depart_hq'])} -> {arrivals} -> HQ {fmt_time(leg['hq_return'])}"))
+            rows.append((f"Food run: {names}", f"Leave HQ {fmt_time(leg['depart_hq'])} -> {arrivals} (no HQ required after food)"))
         elif leg["type"] == "pickup":
             for s in leg["stops"]:
                 late = f" (LATE {s['late_by']}min)" if s["late_by"] > 0 else " (on time)"
@@ -827,6 +937,13 @@ def driver_timeline_rows(state: DriverState) -> List[Tuple[str, str]]:
             rows.append(("-> HQ", f"Leave HQ {fmt_time(leg['depart_hq'])} ... back to HQ {fmt_time(leg['hq_return'])}"))
         elif leg["type"] == "shift":
             rows.append((f"Shift: {leg['from']} -> {leg['to']}",
-                         f"Leave HQ {fmt_time(leg['depart_hq'])} -> pickup {fmt_time(leg['arrive_from'])} -> drop {fmt_time(leg['arrive_to'])} -> HQ {fmt_time(leg['hq_return'])}"))
-        prev_return = leg["hq_return"]
+                         f"Leave {fmt_time(leg['depart_hq'])} -> pickup {fmt_time(leg['arrive_from'])} -> drop {fmt_time(leg['arrive_to'])} (free at destination, no HQ required)"))
+        if leg["type"] == "pickup":
+            prev_return = leg.get("hq_return")
+        elif leg["type"] == "food" and leg.get("stops"):
+            prev_return = leg["stops"][-1]["arrive"] + STOP_DWELL_MIN
+        elif leg["type"] == "shift":
+            prev_return = leg.get("arrive_to")
+        else:
+            prev_return = leg.get("hq_return")
     return rows
