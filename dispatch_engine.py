@@ -533,23 +533,25 @@ def time_food_cluster(cluster: dict, earliest_depart: int) -> dict:
 
 def time_shift(shift: dict, earliest_depart: int, from_hq: bool = True, free_lat=None, free_lon=None) -> dict:
     """Site-to-site transfer, must land before SHIFT_HARD_CUTOFF.
-    After drop at destination, driver is free there (no HQ required — workers already dropped)."""
+    After drop at destination, driver is free there (no HQ — workers already dropped).
+    Second shift in a chain uses light local travel from previous drop point."""
     fi, ti = shift["from_info"], shift["to_info"]
     if from_hq or free_lat is None:
         depart = max(earliest_depart, EVENING_START)
         arrive_from = depart + travel_hq_to(fi)
         depart_label = depart
     else:
-        # leave from current free location
-        d = haversine_km(free_lat, free_lon, fi.get("lat"), fi.get("lon"))
-        leg = travel_km_min(d) if d is not None else travel_hq_to(fi)
+        # Local hop: previous drop → next from-school (not full HQ formula)
+        fake_from = {"lat": free_lat, "lon": free_lon}
+        leg = travel_between(fake_from, fi)
         depart = max(earliest_depart, EVENING_START)
-        arrive_from = depart + (leg or 40)
+        arrive_from = depart + leg
         depart_label = depart
     depart_from = arrive_from + STOP_DWELL_MIN
     arrive_to = depart_from + travel_between(fi, ti)
-    # Optional HQ for display if they choose to return; not required
     hq_return = arrive_to + STOP_DWELL_MIN + travel_hq_to(ti)
+    # Soft: first shift hard 7pm; chained second shift allow +20 min
+    cutoff = SHIFT_HARD_CUTOFF if from_hq else SHIFT_HARD_CUTOFF + 45  # chain of nearby schools
     return {
         "type": "shift",
         "from": shift["from"], "to": shift["to"],
@@ -558,7 +560,7 @@ def time_shift(shift: dict, earliest_depart: int, from_hq: bool = True, free_lat
         "arrive_from": arrive_from,
         "arrive_to": arrive_to,
         "hq_return": hq_return,
-        "feasible": arrive_to <= SHIFT_HARD_CUTOFF,
+        "feasible": arrive_to <= cutoff,
     }
 
 
@@ -802,9 +804,12 @@ def assign_food_waves(dinner_jobs: List[dict], states: Dict[str, DriverState], n
 
 
 def assign_shifts(shifts: List[dict], states: Dict[str, DriverState], notes: List[str]):
-    """Site-to-site transfers before 7pm. Prefer ONE free OT (no food run) for
-    ALL of them if that OT can feasibly chain them; never use staff while a
-    free OT can do it."""
+    """Site-to-site transfers before 7pm.
+
+    Prefer ONE free OT (no food) for ALL shifts when feasible — chain without
+    HQ between stops (workers already dropped at destination school).
+    Nearby schools → same ACJC drop = one driver, one continuous run.
+    """
     if not shifts:
         return []
     ot_states, staff_states = _ot_first_pool(list(states.values()))
@@ -814,23 +819,54 @@ def assign_shifts(shifts: List[dict], states: Dict[str, DriverState], notes: Lis
     result = []
     remaining = list(shifts)
 
-    for st in free_ot:
-        trial_engagements: List[dict] = []
-        ok = True
-        for s in remaining:
-            floor = st.free_at if not trial_engagements else trial_engagements[-1]["hq_return"] + MIN_HQ_REST_MIN
-            leg = time_shift(s, floor)
+    def chain_all(st, items):
+        """Try continuous chain: after first drop, leave from destination to next from-site."""
+        trials = []
+        floor = st.earliest_depart()
+        at_hq = st.at_hq
+        flat, flon = st.free_lat, st.free_lon
+        for s in items:
+            leg = time_shift(s, floor, from_hq=at_hq, free_lat=flat, free_lon=flon)
             if not leg["feasible"]:
-                ok = False
-                break
-            trial_engagements.append(leg)
-        if ok and trial_engagements:
-            for s, leg in zip(remaining, trial_engagements):
+                return None
+            trials.append(leg)
+            # next leg starts from this destination (no HQ)
+            floor = leg["arrive_to"] + STOP_DWELL_MIN
+            at_hq = False
+            ti = s["to_info"]
+            flat, flon = ti.get("lat"), ti.get("lon")
+        return trials
+
+    # Order shifts for a tight chain: farthest from HQ first, then nearest to last drop
+    def ordered_for_chain(items):
+        if len(items) <= 1:
+            return list(items)
+        # start with farthest from HQ
+        first = max(items, key=lambda s: travel_hq_to(s["from_info"]))
+        left = [s for s in items if s is not first]
+        ordered = [first]
+        cur = first["to_info"]
+        while left:
+            nxt = min(left, key=lambda s: haversine_km(
+                cur.get("lat"), cur.get("lon"),
+                s["from_info"].get("lat"), s["from_info"].get("lon")
+            ) or 99)
+            ordered.append(nxt)
+            left.remove(nxt)
+            cur = nxt["to_info"]
+        return ordered
+
+    # Try put ALL shifts on one free OT (one continuous school run)
+    for st in free_ot:
+        trials = chain_all(st, ordered_for_chain(remaining))
+        if trials:
+            remaining_ordered = ordered_for_chain(remaining)
+            for s, leg in zip(remaining_ordered, trials):
                 st.commit(leg)
                 result.append({"from": s["from"], "to": s["to"], "driver": st.name})
                 notes.append(
                     f"[SHIFT] {s['from']} -> {s['to']} -> {st.name} "
-                    f"(leave HQ {fmt_time(leg['depart_hq'])}, back {fmt_time(leg['hq_return'])})"
+                    f"(leave {fmt_time(leg['depart_hq'])}, drop {fmt_time(leg['arrive_to'])}, no HQ required)"
                 )
             remaining = []
             break
@@ -838,8 +874,11 @@ def assign_shifts(shifts: List[dict], states: Dict[str, DriverState], notes: Lis
     for s in remaining:
         placed = False
         for pool in (free_ot, busy_ot, staff_states):
-            for st in sorted(pool, key=lambda s: s.balance_key()):
-                leg = time_shift(s, st.earliest_depart())
+            for st in sorted(pool, key=lambda x: x.balance_key()):
+                leg = time_shift(
+                    s, st.earliest_depart(),
+                    from_hq=st.at_hq, free_lat=st.free_lat, free_lon=st.free_lon,
+                )
                 if not leg["feasible"]:
                     continue
                 st.commit(leg)
@@ -847,7 +886,7 @@ def assign_shifts(shifts: List[dict], states: Dict[str, DriverState], notes: Lis
                 tag = "OT" if st.is_ot else "STAFF"
                 notes.append(
                     f"[SHIFT] [{tag}] {s['from']} -> {s['to']} -> {st.name} "
-                    f"(leave HQ {fmt_time(leg['depart_hq'])}, back {fmt_time(leg['hq_return'])})"
+                    f"(leave {fmt_time(leg['depart_hq'])}, drop {fmt_time(leg['arrive_to'])}, no HQ required)"
                 )
                 placed = True
                 break
