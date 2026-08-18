@@ -318,14 +318,57 @@ def _nn_route_minutes(stops: List[dict]) -> int:
     return total
 
 
+def _cluster_diameter_km(jobs: List[dict]) -> float:
+    """Max pairwise distance inside a cluster — human rule: keep stops local."""
+    infos = [j["info"] for j in jobs if j.get("info")]
+    if len(infos) < 2:
+        return 0.0
+    best = 0.0
+    for i in range(len(infos)):
+        for k in range(i + 1, len(infos)):
+            d = haversine_km(infos[i].get("lat"), infos[i].get("lon"),
+                             infos[k].get("lat"), infos[k].get("lon"))
+            if d is not None and d > best:
+                best = d
+    return best
+
+
+def _min_link_km(jobs_a: List[dict], jobs_b: List[dict]) -> float:
+    """Closest site-to-site between two clusters (proximity merge key)."""
+    best = 999.0
+    for ja in jobs_a:
+        for jb in jobs_b:
+            ia, ib = ja.get("info"), jb.get("info")
+            if not ia or not ib:
+                continue
+            d = haversine_km(ia.get("lat"), ia.get("lon"), ib.get("lat"), ib.get("lon"))
+            if d is not None and d < best:
+                best = d
+    return best
+
+
+# Same-wave cluster: max geographic diameter (km). ~12 km ≈ 15–20 min local hop.
+CLUSTER_MAX_DIAMETER_KM = 12.0
+
+
 def cluster_wave(jobs: List[dict], feasible_fn) -> List[dict]:
-    """Greedy merge: cheapest NN route from HQ, capacity ≤25, feasible_fn True."""
+    """Human-style clustering for one end-time wave:
+
+    Merge the CLOSEST pair of clusters first (min link distance), not the
+    cheapest route-from-HQ. Refuse merge if:
+      - capacity > 25
+      - cluster diameter would exceed CLUSTER_MAX_DIAMETER_KM
+      - feasible_fn (deadline) fails
+
+    That keeps west sites with west sites and stops random pairings like
+    Jurong West + a distant school while a nearer site sits alone.
+    """
     clusterable = [j for j in jobs if j.get("info")]
     unclusterable = [j for j in jobs if not j.get("info")]
     clusters = [{"jobs": [j], "workers": j["workers"] or 0} for j in clusterable]
 
     while len(clusters) > 1:
-        best = None
+        best = None  # (link_km, i, k)
         for i in range(len(clusters)):
             for k in range(i + 1, len(clusters)):
                 ci, ck = clusters[i], clusters[k]
@@ -333,11 +376,13 @@ def cluster_wave(jobs: List[dict], feasible_fn) -> List[dict]:
                 if pax > 25:
                     continue
                 merged_jobs = ci["jobs"] + ck["jobs"]
+                if _cluster_diameter_km(merged_jobs) > CLUSTER_MAX_DIAMETER_KM:
+                    continue
                 if not feasible_fn(merged_jobs):
                     continue
-                cost = _nn_route_minutes([j["info"] for j in merged_jobs])
-                if best is None or cost < best[0]:
-                    best = (cost, i, k)
+                link = _min_link_km(ci["jobs"], ck["jobs"])
+                if best is None or link < best[0]:
+                    best = (link, i, k)
         if best is None:
             break
         _, i, k = best
@@ -758,6 +803,55 @@ def assign_pickup_wave(
 # Orchestration
 # ---------------------------------------------------------------------------
 
+
+def _rebalance_staff_to_ot(assignment, resolvable, states, notes):
+    """Human check: staff should not keep a job an OT can still do on time."""
+    ot = sorted([s for s in states.values() if s.is_ot], key=lambda s: s.balance_key())
+    staff_names = {s.name for s in states.values() if not s.is_ot}
+
+    # Group current pickup assignments that are on staff, by end_min
+    by_end: Dict[int, List[dict]] = {}
+    for j in resolvable:
+        name = assignment.get(j["site_label"], {}).get("pickup")
+        if not name or name not in staff_names:
+            continue
+        by_end.setdefault(j["end_min"], []).append(j)
+
+    for end_min, job_list in sorted(by_end.items()):
+        # rebuild clusters of staff-held jobs for this wave
+        def feas(jobs):
+            trial = {"jobs": jobs, "workers": sum(x["workers"] or 0 for x in jobs)}
+            return time_pickup(trial, end_min, EVENING_START)["feasible"]
+        clusters = cluster_wave(job_list, feas)
+        for cl in clusters:
+            pax = cl["workers"]
+            moved = False
+            for st in ot:
+                if st.cap < pax:
+                    continue
+                leg = time_pickup(
+                    cl, end_min, st.earliest(),
+                    at_hq=st.at_hq, free_lat=st.free_lat, free_lon=st.free_lon,
+                )
+                if not leg["feasible"]:
+                    continue
+                # Unhook from staff in notes only; commit to OT
+                st.commit(leg, workers=pax)
+                if end_min >= 22 * 60:
+                    st.did_10pm = True
+                for j in cl["jobs"]:
+                    assignment[j["site_label"]]["pickup"] = st.name
+                names = ", ".join(j["site_label"] for j in cl["jobs"])
+                notes.append(
+                    f"[REBALANCE] moved {names} ({pax} pax) off staff → OT {st.name} "
+                    f"(leave {fmt_time(leg['depart'])}, HQ {fmt_time(leg['hq_return'])})"
+                )
+                moved = True
+                break
+            if not moved:
+                continue
+
+
 def build_schedule(jobs: List[dict], shifts: List[dict], fleet: List[dict]):
     notes: List[str] = []
     states = {d["name"]: DriverState(d) for d in fleet}
@@ -787,6 +881,9 @@ def build_schedule(jobs: List[dict], shifts: List[dict], fleet: List[dict]):
         is10 = end_min >= 22 * 60
         for label, name in assign_pickup_wave(wave, end_min, states, notes, spread_10pm=is10).items():
             assignment[label]["pickup"] = name
+
+    # 4) Rebalance: if staff holds a pickup and an OT is free in time, steal to OT
+    _rebalance_staff_to_ot(assignment, resolvable, states, notes)
 
     ot = [s for s in states.values() if s.is_ot]
     notes.append(
