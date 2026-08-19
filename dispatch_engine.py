@@ -715,13 +715,30 @@ def assign_pickup_wave(
     assignment: Dict[str, dict] = {}  # site_label -> {"pickup": name}
     unplaced: List[dict] = []
 
-    def candidate_pool():
-        return sorted(ot_states, key=lambda s: s.balance_key()) + sorted(staff_states, key=lambda s: s.balance_key())
+    def candidate_pool(cl):
+        # OT first. Among OT: nearest to cluster (post-shift at ACJC → nearby MOE first)
+        # so we don't pay OT for empty time while staff take local 7pm jobs.
+        infos = [j["info"] for j in cl["jobs"] if j.get("info")]
+        def near(st):
+            if not st.is_ot:
+                return 999
+            if st.location is None:  # at HQ
+                if not infos:
+                    return 50
+                return min(travel_hq_to(i) for i in infos)
+            return min(
+                (haversine_km(st.location.get("lat"), st.location.get("lon"),
+                              i.get("lat"), i.get("lon")) or 99)
+                for i in infos
+            ) if infos else 99
+        ot_sorted = sorted(ot_states, key=lambda s: (near(s), s.balance_key()))
+        staff_sorted = sorted(staff_states, key=lambda s: s.balance_key())
+        return ot_sorted + staff_sorted
 
     for cl in clusters:
         pax = cl["workers"]
         placed = False
-        for st in candidate_pool():
+        for st in candidate_pool(cl):
             if st.cap < pax:
                 continue
             leg = time_pickup_cluster(cl, end_min, st.earliest_depart(), start_loc=st.location)
@@ -748,7 +765,7 @@ def assign_pickup_wave(
                 for j in cl["jobs"]:
                     sub = {"jobs": [j], "workers": j["workers"]}
                     sub_placed = False
-                    for st in candidate_pool():
+                    for st in candidate_pool(cl):
                         if st.cap < j["workers"]:
                             continue
                         leg = time_pickup_cluster(sub, end_min, st.earliest_depart(), start_loc=st.location)
@@ -780,7 +797,7 @@ def assign_pickup_wave(
         sub = {"jobs": [j], "workers": j["workers"]}
         placed = False
         for tol in (PICKUP_LATE_TOLERANCE * 2, PICKUP_LATE_TOLERANCE * 3, PICKUP_LATE_TOLERANCE * 5):
-            for st in candidate_pool():
+            for st in candidate_pool(cl):
                 if st.cap < j["workers"]:
                     continue
                 leg = time_pickup_cluster(sub, end_min, st.earliest_depart(), start_loc=st.location, tolerance=tol)
