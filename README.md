@@ -9,25 +9,32 @@ for the full design note; short version below.
 Every night's jobs are grouped into "waves" by shift-end time (7:00 PM,
 9:00 PM, 10:00 PM, ...). Within a wave, jobs that are geographically close
 become **one cluster and ride one lorry** — clustering runs on *every*
-wave now, not just the 22:00 dinner sites. Every driver's evening is a
-chronological chain:
+wave now, not just the 22:00 dinner sites. An OT driver's evening is a
+chronological chain, moving straight from one task into the next:
 
 ```
-[Food run] -> HQ -> rest -> [7PM wave] -> HQ -> rest -> [9PM wave] -> HQ -> ...
+[Food run] -> [middle-wave pickup, if there's a gap] -> [FINAL WAVE pickup -> HQ]
 ```
 
-Two rules drive every timing decision:
+Three rules drive every timing decision:
 
-1. **Pickups are just-in-time.** A driver leaves HQ at the *latest* moment
-   that still lands them at the site ~2 min after the shift ends. We never
-   send a driver out early to sit and wait at a site — if there's slack,
-   they wait at HQ, where the next job can also be picked up. (This is the
-   opposite of the old engine, which would send a driver out early and let
-   them idle at the site for up to an hour.)
-2. **No site-to-site jumps across waves.** A driver must pass through HQ
-   between two different end-time waves (drop workers, minimum handover
-   rest) before leaving for the next one. The only same-trip exception is
-   multiple sites *inside the same cluster* (same end time, nearby).
+1. **Pickups are just-in-time.** A driver leaves for a pickup at the
+   *latest* moment that still lands them at the site ~2 min after the
+   shift ends. We never send a driver out early to sit and wait at a site.
+2. **HQ only shows up where workers are actually dropped off.** A pickup
+   always ends with an explicit return to HQ — that's the point of a
+   pickup. Food and shift legs do **not** detour through HQ: the next task
+   departs straight from wherever the driver last dropped off. (This is
+   the opposite of the old engine, which would send a driver out early to
+   an idle wait at the pickup site, and separately forced a pointless
+   round trip to HQ after every single leg regardless of whether anyone
+   was actually being dropped off there.)
+3. **The last wave of the night is the OT's anchor job**, spread across
+   *every* OT driver rather than consolidated onto the fewest lorries —
+   because that's the work that makes the OT rate worth it. It's reserved
+   for each OT the moment food/shifts are locked in, so a middle-wave job
+   can still use their idle time later without silently costing them that
+   reservation.
 
 ## Business rules (built into the engine)
 
@@ -38,25 +45,40 @@ Two rules drive every timing decision:
    soon as you hit **Refresh data**. No code change needed, and no more
    "driver removed from the sheet but still shows up" — that was a caching
    issue, fixed by the explicit refresh button.
-3. **Staff only when OT truly can't cover** a job — timing-infeasible or
-   over capacity. Staff never get a food run and never wait around; each
-   staff trip is an independent, just-in-time HQ → site(s) → HQ sortie.
-4. **Location first**, on every wave: nearby jobs share one lorry whenever
+3. **The last (latest end-time) wave is the OT's anchor job.** It's what
+   makes their evening worth the OT rate, so it's OT-only and deliberately
+   *spread across every OT driver* rather than consolidated onto the
+   fewest lorries — if there are at least as many sites as OT, every OT
+   gets one.
+4. **Staff are one trip and done.** They're not OT, so they never get
+   chained across multiple waves — one pickup (possibly multi-stop if
+   clustered), then they're finished for the night. Staff also never touch
+   the final/latest wave — that's reserved for OT.
+5. **HQ only appears where workers are actually dropped off.** A pickup
+   always ends with an explicit return to HQ (that's the whole point of a
+   pickup). Food and shift legs do **not** force a detour through HQ — the
+   driver's next task departs straight from wherever they last dropped
+   off, and any OT idle time in between is used opportunistically for a
+   middle-wave job *without* risking their locked-in final-wave slot.
+6. **No manufactured rest windows.** OT move to their next task as soon as
+   they're physically able; they eat/breathe during whatever natural gap
+   the just-in-time timing leaves, not on a schedule the engine invents.
+7. **Location first**, on every wave: nearby jobs share one lorry whenever
    capacity (≤25 pax, the 14ft cap) and timing allow. Clustering is decided
    by the *real* deadline math for that job type, not an arbitrary "route
    budget" constant — so it automatically adapts to how far a site is from
    HQ instead of silently under-clustering anything far out.
-5. **Shifts (site-to-site, before 7 PM)** prefer a single free OT (no food
+8. **Shifts (site-to-site, before 7 PM)** prefer a single free OT (no food
    run) to chain all of them if feasible; otherwise split across free OT,
    then busy OT, then staff.
-6. **Balance OT** — every assignment step picks the driver with the fewest
+9. **Balance OT** — every assignment step picks the driver with the fewest
    jobs/pax so far, so nobody gets a long night while another OT sits idle.
-7. **Capacity** — 14ft ≈ 25 pax, 10ft ≈ 14 pax, enforced everywhere.
-8. **Best-effort, never silent.** If every driver is genuinely already
-   committed elsewhere, the engine widens the lateness tolerance in steps
-   rather than dropping the job outright — and flags it loudly (⚠️) in the
-   planning log so you can see exactly which nights the fleet is short a
-   lorry, instead of the job just vanishing off the plan.
+10. **Capacity** — 14ft ≈ 25 pax, 10ft ≈ 14 pax, enforced everywhere.
+11. **Best-effort, never silent.** If every driver is genuinely already
+    committed elsewhere, the engine widens the lateness tolerance in steps
+    rather than dropping the job outright — and flags it loudly (⚠️) in the
+    planning log so you can see exactly which nights the fleet is short a
+    lorry, instead of the job just vanishing off the plan.
 
 ## You do not need Python on your PC
 

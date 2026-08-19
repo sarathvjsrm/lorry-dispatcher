@@ -18,9 +18,10 @@ from dispatch_engine import (
 st.set_page_config(page_title="Anderco Lorry Dispatcher", page_icon="🚚", layout="wide")
 st.title("🚚 Anderco Dynamic Lorry Dispatcher")
 st.caption(
-    "OT first · food only for ≥22:00 sites, delivered by 6:30 PM · pickups are "
-    "just-in-time (never sent early to wait at a site) · HQ shown on every leg · "
-    "location-first clustering on EVERY wave, not just dinner."
+    "OT anchor the night (food + the last/latest wave, spread across every OT) · "
+    "staff cover the middle waves, one trip each · pickups are just-in-time "
+    "(never sent early to wait at a site) · HQ only shows up where workers are "
+    "actually dropped off · location-first clustering on every wave."
 )
 
 SPREADSHEET_ID = config["spreadsheet_id"]
@@ -141,7 +142,8 @@ if st.button("🚀 Generate Dispatch", type="primary"):
     st.subheader("🚚 Driver timelines")
     st.caption(
         "Just-in-time: a driver leaves HQ at the latest moment that still makes "
-        "the pickup on time. Idle time shows as 'Rest at HQ', never as waiting at a site."
+        "the pickup on time. HQ only shows up where workers are actually dropped off "
+        "(end of a pickup) -- food and shift legs go straight into the next task."
     )
     ot_names = [d["name"] for d in fleet if d.get("is_ot")]
     ordered_drivers = [n for n in ot_names if n in states] + [
