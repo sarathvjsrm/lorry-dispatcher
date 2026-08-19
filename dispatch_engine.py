@@ -448,7 +448,7 @@ def cluster_same_endtime(jobs: List[dict], feasible_fn) -> List[dict]:
                                          infos[b].get("lat"), infos[b].get("lon"))
                         if d is not None and d > diam:
                             diam = d
-                if diam > 12.0:  # ~12km max — nearby MOE/west stay together, not random far pairs
+                if diam > 8.0:  # tight zone: Tuas together, Jurong together — not ACJC+Jurong SS
                     continue
                 # merge score = closest link (not HQ route cost) so nearby same-time stick
                 link = 999.0
