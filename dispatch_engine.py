@@ -75,7 +75,7 @@ FOOD_TARGET_MIN = 18 * 60 + 30        # 6:30 PM target delivery
 FOOD_HARD_MIN = 19 * 60               # 7:00 PM hard cutoff
 
 PICKUP_BOARD_MIN = 2                  # workers board ~2 min after shift end (scan out)
-PICKUP_LATE_TOLERANCE = 15            # a 2nd/3rd stop in a cluster may run up to this late
+PICKUP_LATE_TOLERANCE = 25  # 2nd stop in same-wave cluster (Tuas/west hops ~15 min)            # a 2nd/3rd stop in a cluster may run up to this late
 STOP_DWELL_MIN = 2                    # minutes spent boarding workers at each stop
 
 # NOTE: deliberately no "minimum rest" constant. OT move straight to their
