@@ -665,7 +665,7 @@ def time_multi_shift(
     arrive_to = t + travel_between(prev, ti)
     finish = arrive_to + STOP_DWELL_MIN
     # multi-school transfer: allow until 7:30 if needed (must prefer finish before 7)
-    soft = SHIFT_HARD_CUTOFF + 30
+    soft = SHIFT_HARD_CUTOFF + 60  # one lorry for multi-school shift must succeed
     return {
         "type": "shift_multi",
         "from_list": [s["from"] for s in ordered],
@@ -993,14 +993,26 @@ def assign_shifts(shifts: List[dict], states: Dict[str, DriverState], notes: Lis
     result = []
     remaining = list(shifts)
 
-    # Same TO → ONE multi-pickup → one drop (BBSS + Boon Lay → ACJC)
+    # Same destination (by coords/code, not display text) → ONE multi-pickup → one drop
+    def to_key(s):
+        ti = s.get("to_info") or {}
+        code = ti.get("code") or ""
+        if code:
+            return code
+        lat, lon = ti.get("lat"), ti.get("lon")
+        if lat is not None and lon is not None:
+            return f"{round(float(lat),5)},{round(float(lon),5)}"
+        return (s.get("to") or "").strip().lower()
+
     by_to = {}
     for s in remaining:
-        by_to.setdefault(s["to"], []).append(s)
+        by_to.setdefault(to_key(s), []).append(s)
 
     still = []
-    for to_label, group in sorted(by_to.items(), key=lambda kv: -len(kv[1])):
+    for _key, group in sorted(by_to.items(), key=lambda kv: -len(kv[1])):
+        to_label = group[0]["to"]
         placed = False
+        # Prefer ONE free OT for the whole group — never split across two drivers
         for pool in (free_ot, busy_ot):
             for st in pool:
                 leg = time_multi_shift(group, st.earliest_depart(), start_loc=st.location)
@@ -1012,12 +1024,36 @@ def assign_shifts(shifts: List[dict], states: Dict[str, DriverState], notes: Lis
                 notes.append(
                     f"[SHIFT] {st.name}: pick {' + '.join(leg['from_list'])} → drop {to_label} "
                     f"(leave {fmt_time(leg['depart_time'])}, drop {fmt_time(leg['arrive_to'])}, "
-                    f"ONE lorry — free at destination for nearby 7pm)"
+                    f"ONE lorry only)"
                 )
                 placed = True
                 break
             if placed:
                 break
+        if not placed:
+            # last resort: still try ONE driver with soft single-leg chain, not two drivers
+            for st in free_ot + busy_ot:
+                loc = st.location
+                floor = st.earliest_depart()
+                trials = []
+                ok = True
+                for s in group:
+                    leg = time_shift(s, floor, start_loc=loc)
+                    if not leg["feasible"]:
+                        ok = False
+                        break
+                    trials.append((s, leg))
+                    floor = leg["finish_time"]
+                    loc = leg["finish_location"]
+                if ok and trials:
+                    for s, leg in trials:
+                        st.commit(leg)
+                        result.append({"from": s["from"], "to": s["to"], "driver": st.name})
+                    notes.append(
+                        f"[SHIFT] {st.name}: chained {len(trials)} → {to_label} (ONE driver)"
+                    )
+                    placed = True
+                    break
         if not placed:
             still.extend(group)
     remaining = still
