@@ -533,6 +533,7 @@ class DriverState:
         self.pax_count = 0
         self.did_food = False
         self.did_10pm = False
+        self.food_sites = set()  # site labels this OT delivered food to
 
     def earliest(self) -> int:
         if not self.engagements:
@@ -583,6 +584,7 @@ def assign_food(dinner_jobs: List[dict], states: Dict[str, DriverState], notes: 
             st.did_food = True
             for j in cl["jobs"]:
                 out[j["site_label"]] = st.name
+                st.food_sites.add(j["site_label"])
             names = ", ".join(j["site_label"] for j in cl["jobs"])
             warn = "" if leg["on_target"] else " (after 6:30 target, before 7:00 hard)"
             notes.append(
@@ -741,13 +743,23 @@ def assign_pickup_wave(
     for cl in clusters:
         pax = cl["workers"]
         if spread_10pm:
-            ot_pool = sorted([s for s in ot if not s.did_10pm], key=lambda s: s.balance_key()) + \
-                      sorted([s for s in ot if s.did_10pm], key=lambda s: s.balance_key())
+            def food_affinity(st, cl_jobs=None):
+                # Prefer OT who already did food for sites in this cluster (same evening continuity)
+                return 0
+
+            ot_fresh = [s for s in ot if not s.did_10pm]
+            ot_done = [s for s in ot if s.did_10pm]
+            # Sort fresh: those with food overlap first, then lightest load
+            def sort_10(st, cluster_labels):
+                overlap = len(st.food_sites & cluster_labels)
+                return (-overlap, st.balance_key())
+
+            ot_pool = ot_fresh + ot_done  # refined per cluster below
         else:
             ot_pool = sorted(ot, key=lambda s: s.balance_key())
         staff_pool = sorted(staff, key=lambda s: s.balance_key())
 
-        # Prefer OT already in the area (post-shift / post-food) before HQ OT / staff
+        labels = {j["site_label"] for j in cl["jobs"]}
         def near_score(st):
             if st.at_hq:
                 return 999
@@ -759,14 +771,26 @@ def assign_pickup_wave(
                 for i in infos
             )
 
-        ot_local = sorted([s for s in ot_pool if not s.at_hq], key=lambda s: (near_score(s), s.balance_key()))
-        ot_hq = sorted([s for s in ot_pool if s.at_hq], key=lambda s: s.balance_key())
+        def rank_ot(st):
+            # 10pm: food continuity first, then no prior 10pm, then local, then light load
+            food_hit = len(st.food_sites & labels) if spread_10pm else 0
+            return (
+                -food_hit,
+                0 if not st.did_10pm else 1,
+                near_score(st),
+                st.balance_key(),
+            )
+
+        ot_ranked = sorted(ot_pool if not spread_10pm else [s for s in ot], key=rank_ot)
+        ot_local = [s for s in ot_ranked if not s.at_hq]
+        ot_hq = [s for s in ot_ranked if s.at_hq]
 
         placed = False
         for pool, tol in (
-            (ot_local, PICKUP_LATE_TOLERANCE + 20),  # post-shift: allow a bit late from area
+            (ot_ranked, PICKUP_LATE_TOLERANCE + (20 if spread_10pm else 0)),
+            (ot_local, PICKUP_LATE_TOLERANCE + 20),
             (ot_hq, PICKUP_LATE_TOLERANCE),
-            (ot_pool, PICKUP_LATE_TOLERANCE + 15),
+            (ot_ranked, PICKUP_LATE_TOLERANCE + 15),
             (staff_pool, PICKUP_LATE_TOLERANCE),
         ):
             if placed:
