@@ -439,9 +439,29 @@ def cluster_same_endtime(jobs: List[dict], feasible_fn) -> List[dict]:
                 merged_jobs = ci["jobs"] + ck["jobs"]
                 if not feasible_fn(merged_jobs):
                     continue
-                cost = _route_time_from_hq([j["info"] for j in merged_jobs])
-                if best is None or cost < best[0]:
-                    best = (cost, i, k)
+                # Prefer close pairs (save fuel): refuse wide clusters
+                infos = [j["info"] for j in merged_jobs if j.get("info")]
+                diam = 0.0
+                for a in range(len(infos)):
+                    for b in range(a + 1, len(infos)):
+                        d = haversine_km(infos[a].get("lat"), infos[a].get("lon"),
+                                         infos[b].get("lat"), infos[b].get("lon"))
+                        if d is not None and d > diam:
+                            diam = d
+                if diam > 12.0:  # ~12km max — nearby MOE/west stay together, not random far pairs
+                    continue
+                # merge score = closest link (not HQ route cost) so nearby same-time stick
+                link = 999.0
+                for ja in clusters[i]["jobs"]:
+                    for jb in clusters[k]["jobs"]:
+                        ia, ib = ja.get("info"), jb.get("info")
+                        if not ia or not ib:
+                            continue
+                        d = haversine_km(ia.get("lat"), ia.get("lon"), ib.get("lat"), ib.get("lon"))
+                        if d is not None and d < link:
+                            link = d
+                if best is None or link < best[0]:
+                    best = (link, i, k)
         if best is None:
             break
         _, i, k = best
@@ -606,6 +626,59 @@ class DriverState:
 
     def balance_key(self):
         return (self.jobs_count, self.pax_count)
+
+
+
+def time_multi_shift(
+    from_shifts: list,
+    earliest_depart: int,
+    start_loc=None,
+) -> dict:
+    """ONE run: pick several FROM schools, then ONE drop at shared TO.
+    Example: BBSS + Boon Lay Garden → ACJC before 7pm.
+    Driver free at TO (no HQ)."""
+    if not from_shifts:
+        return {"feasible": False}
+    ti = from_shifts[0]["to_info"]
+    to_label = from_shifts[0]["to"]
+    # farthest from TO first, closest last
+    ordered = sorted(
+        from_shifts,
+        key=lambda s: -(haversine_km(
+            s["from_info"].get("lat"), s["from_info"].get("lon"),
+            ti.get("lat"), ti.get("lon")) or 0),
+    )
+    depart = max(earliest_depart, EVENING_START)
+    t = depart
+    prev = None
+    pick_stops = []
+    start = start_loc
+    for s in ordered:
+        fi = s["from_info"]
+        leg = travel_from(start if prev is None else None, fi) if prev is None else travel_between(prev, fi)
+        if prev is None:
+            leg = travel_from(start_loc, fi)
+        arrive = t + leg
+        pick_stops.append({"site": fi, "label": s["from"], "arrive": arrive})
+        t = arrive + STOP_DWELL_MIN
+        prev = fi
+    arrive_to = t + travel_between(prev, ti)
+    finish = arrive_to + STOP_DWELL_MIN
+    # multi-school transfer: allow until 7:30 if needed (must prefer finish before 7)
+    soft = SHIFT_HARD_CUTOFF + 30
+    return {
+        "type": "shift_multi",
+        "from_list": [s["from"] for s in ordered],
+        "to": to_label,
+        "depart_time": depart,
+        "pick_stops": pick_stops,
+        "arrive_to": arrive_to,
+        "finish_time": finish,
+        "finish_location": ti,
+        "feasible": arrive_to <= soft,
+        "workers": 0,
+    }
+
 
 
 def _ot_first_pool(states: List[DriverState]):
@@ -920,7 +993,7 @@ def assign_shifts(shifts: List[dict], states: Dict[str, DriverState], notes: Lis
     result = []
     remaining = list(shifts)
 
-    # Group same TO → one OT chains all froms (04+06→01 style)
+    # Same TO → ONE multi-pickup → one drop (BBSS + Boon Lay → ACJC)
     by_to = {}
     for s in remaining:
         by_to.setdefault(s["to"], []).append(s)
@@ -928,65 +1001,26 @@ def assign_shifts(shifts: List[dict], states: Dict[str, DriverState], notes: Lis
     still = []
     for to_label, group in sorted(by_to.items(), key=lambda kv: -len(kv[1])):
         placed = False
-        for st in free_ot:
-            trial_engagements = []
-            loc = st.location
-            floor = st.free_at
-            ok = True
-            # order: farther from TO first
-            to_info = group[0]["to_info"]
-            ordered = sorted(
-                group,
-                key=lambda g: -(haversine_km(
-                    g["from_info"].get("lat"), g["from_info"].get("lon"),
-                    to_info.get("lat"), to_info.get("lon")) or 0),
-            )
-            for s in ordered:
-                leg = time_shift(s, floor, start_loc=loc)
+        for pool in (free_ot, busy_ot):
+            for st in pool:
+                leg = time_multi_shift(group, st.earliest_depart(), start_loc=st.location)
                 if not leg["feasible"]:
-                    ok = False
-                    break
-                trial_engagements.append((s, leg))
-                floor = leg["finish_time"]
-                loc = leg["finish_location"]
-            if ok and trial_engagements:
-                for s, leg in trial_engagements:
-                    st.commit(leg)
+                    continue
+                st.commit(leg)
+                for s in group:
                     result.append({"from": s["from"], "to": s["to"], "driver": st.name})
-                    notes.append(
-                        f"[SHIFT] {s['from']} -> {s['to']} -> {st.name} "
-                        f"(leave {fmt_time(leg['depart_time'])}, drop {fmt_time(leg['arrive_to'])}, free at TO)"
-                    )
+                notes.append(
+                    f"[SHIFT] {st.name}: pick {' + '.join(leg['from_list'])} → drop {to_label} "
+                    f"(leave {fmt_time(leg['depart_time'])}, drop {fmt_time(leg['arrive_to'])}, "
+                    f"ONE lorry — free at destination for nearby 7pm)"
+                )
                 placed = True
+                break
+            if placed:
                 break
         if not placed:
             still.extend(group)
     remaining = still
-
-    for st in free_ot:
-        if not remaining:
-            break
-        trial_engagements: List[dict] = []
-        ok = True
-        loc = st.location
-        for s in remaining:
-            floor = st.free_at if not trial_engagements else trial_engagements[-1]["finish_time"]
-            leg = time_shift(s, floor, start_loc=loc)
-            if not leg["feasible"]:
-                ok = False
-                break
-            trial_engagements.append(leg)
-            loc = leg["finish_location"]
-        if ok and trial_engagements:
-            for s, leg in zip(remaining, trial_engagements):
-                st.commit(leg)
-                result.append({"from": s["from"], "to": s["to"], "driver": st.name})
-                notes.append(
-                    f"[SHIFT] {s['from']} -> {s['to']} -> {st.name} "
-                    f"(leave {fmt_time(leg['depart_time'])}, drop {fmt_time(leg['arrive_to'])})"
-                )
-            remaining = []
-            break
 
     for s in remaining:
         placed = False
@@ -1115,4 +1149,10 @@ def driver_timeline_rows(state: DriverState) -> List[Tuple[str, str]]:
         elif leg["type"] == "shift":
             rows.append((f"Shift: {leg['from']} -> {leg['to']}",
                          f"Leave {fmt_time(leg['depart_time'])} -> pickup {fmt_time(leg['arrive_from'])} -> drop {fmt_time(leg['arrive_to'])}"))
+        elif leg["type"] == "shift_multi":
+            picks = " → ".join(f"{p['label']} {fmt_time(p['arrive'])}" for p in leg.get("pick_stops", []))
+            rows.append((
+                f"Shift: {' + '.join(leg.get('from_list', []))} → {leg['to']}",
+                f"Leave {fmt_time(leg['depart_time'])} → {picks} → drop {fmt_time(leg['arrive_to'])} (one lorry)",
+            ))
     return rows
