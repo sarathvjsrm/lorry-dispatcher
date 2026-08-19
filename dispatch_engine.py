@@ -582,6 +582,7 @@ class DriverState:
         self.jobs_count = 0
         self.pax_count = 0
         self.did_food = False
+        self.food_sites = set()
         self.got_final_wave = False
         self.final_wave_jobs: List[dict] = []   # reserved (not yet timed) final-wave stops
         self.final_wave_end_min: Optional[int] = None
@@ -629,10 +630,8 @@ def _try_commit_protecting_reservation(st: DriverState, leg: dict, workers: int 
 def assign_pickup_wave(
     jobs_this_wave: List[dict], end_min: int, states: Dict[str, DriverState], notes: List[str]
 ):
-    """Middle waves (everything except the final/latest one). Staff are the
-    primary drivers here -- one trip each, no continuity needed. OT only
-    help as overflow, and only in a way that doesn't cost them their
-    reserved final-wave slot (see _try_commit_protecting_reservation)."""
+    """Middle waves (everything except the final/latest one). OT FIRST (maximise OT pay). Staff only if no OT can cover without
+    breaking reserved 10pm. Staff one-trip only (see _try_commit_protecting_reservation)."""
     def pickup_feasible(merged_jobs):
         trial = {"jobs": merged_jobs, "workers": sum(j["workers"] or 0 for j in merged_jobs)}
         return time_pickup_cluster(trial, end_min, EVENING_START)["feasible"]
@@ -644,7 +643,7 @@ def assign_pickup_wave(
     unplaced: List[dict] = []
 
     def candidate_pool():
-        return sorted(staff_states, key=lambda s: s.balance_key()) + sorted(ot_states, key=lambda s: s.balance_key())
+        return sorted(ot_states, key=lambda s: s.balance_key()) + sorted(staff_states, key=lambda s: s.balance_key())
 
     for cl in clusters:
         pax = cl["workers"]
@@ -753,10 +752,18 @@ def reserve_final_wave(
     driver_jobs: Dict[str, List[dict]] = {ot.name: [] for ot in ot_states}
     unplaced: List[dict] = []
 
+    # Prefer: empty 10pm slot first, then food continuity for this site, then light load
     for j in remaining:
         placed = False
-        for ot in sorted(ot_states, key=lambda o: (len(driver_jobs[o.name]),
-                                                     sum(x["workers"] or 0 for x in driver_jobs[o.name]))):
+        def rank(o):
+            n = len(driver_jobs[o.name])
+            food_hit = 1 if j["site_label"] in o.food_sites else 0
+            return (n, -food_hit, sum(x["workers"] or 0 for x in driver_jobs[o.name]))
+        for ot in sorted(ot_states, key=rank):
+            # Spread: if every OT can have one site, do not stack on OT who already has one
+            if driver_jobs[ot.name] and len(remaining) <= len(ot_states):
+                if any(len(driver_jobs[o.name]) == 0 for o in ot_states):
+                    continue
             trial_jobs = driver_jobs[ot.name] + [j]
             trial = {"jobs": trial_jobs, "workers": sum(x["workers"] or 0 for x in trial_jobs)}
             if trial["workers"] > ot.cap:
@@ -767,6 +774,19 @@ def reserve_final_wave(
             driver_jobs[ot.name] = trial_jobs
             placed = True
             break
+        if not placed:
+            # second pass: allow stack if needed
+            for ot in sorted(ot_states, key=rank):
+                trial_jobs = driver_jobs[ot.name] + [j]
+                trial = {"jobs": trial_jobs, "workers": sum(x["workers"] or 0 for x in trial_jobs)}
+                if trial["workers"] > ot.cap:
+                    continue
+                leg = time_pickup_cluster(trial, end_min, ot.earliest_depart(), start_loc=ot.location)
+                if not leg["feasible"]:
+                    continue
+                driver_jobs[ot.name] = trial_jobs
+                placed = True
+                break
         if not placed:
             unplaced.append(j)
 
@@ -871,6 +891,7 @@ def assign_food_waves(dinner_jobs: List[dict], states: Dict[str, DriverState], n
             st.did_food = True
             for j in cl["jobs"]:
                 assignment[j["site_label"]] = {"dinner": st.name}
+                st.food_sites.add(j["site_label"])
             names = ", ".join(j["site_label"] for j in cl["jobs"])
             warn = "" if leg["on_target"] else " (past 6:30 target, still before 7:00 hard cutoff)"
             notes.append(
@@ -899,7 +920,52 @@ def assign_shifts(shifts: List[dict], states: Dict[str, DriverState], notes: Lis
     result = []
     remaining = list(shifts)
 
+    # Group same TO → one OT chains all froms (04+06→01 style)
+    by_to = {}
+    for s in remaining:
+        by_to.setdefault(s["to"], []).append(s)
+
+    still = []
+    for to_label, group in sorted(by_to.items(), key=lambda kv: -len(kv[1])):
+        placed = False
+        for st in free_ot:
+            trial_engagements = []
+            loc = st.location
+            floor = st.free_at
+            ok = True
+            # order: farther from TO first
+            to_info = group[0]["to_info"]
+            ordered = sorted(
+                group,
+                key=lambda g: -(haversine_km(
+                    g["from_info"].get("lat"), g["from_info"].get("lon"),
+                    to_info.get("lat"), to_info.get("lon")) or 0),
+            )
+            for s in ordered:
+                leg = time_shift(s, floor, start_loc=loc)
+                if not leg["feasible"]:
+                    ok = False
+                    break
+                trial_engagements.append((s, leg))
+                floor = leg["finish_time"]
+                loc = leg["finish_location"]
+            if ok and trial_engagements:
+                for s, leg in trial_engagements:
+                    st.commit(leg)
+                    result.append({"from": s["from"], "to": s["to"], "driver": st.name})
+                    notes.append(
+                        f"[SHIFT] {s['from']} -> {s['to']} -> {st.name} "
+                        f"(leave {fmt_time(leg['depart_time'])}, drop {fmt_time(leg['arrive_to'])}, free at TO)"
+                    )
+                placed = True
+                break
+        if not placed:
+            still.extend(group)
+    remaining = still
+
     for st in free_ot:
+        if not remaining:
+            break
         trial_engagements: List[dict] = []
         ok = True
         loc = st.location
